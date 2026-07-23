@@ -1,6 +1,7 @@
 const model = "deepseek-ai/DeepSeek-V4-Flash";
 const lanes = new Set(["automation", "agency", "art", "creator", "personal"]);
 const verdicts = new Set(["Do now", "Schedule", "Protect", "Park it"]);
+/* __NORTHSTAR_APP_HTML__ */
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), {
   status,
@@ -52,6 +53,11 @@ export default {
       if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
       return assess(request, env);
     }
-    return env.ASSETS.fetch(request);
+    return new Response(appHtml, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    });
   },
 };
