@@ -11,7 +11,7 @@ const json = (value, status = 200) => new Response(JSON.stringify(value), {
 
 const score = (value, fallback) => Number.isFinite(Number(value)) ? Math.max(1, Math.min(10, Math.round(Number(value)))) : fallback;
 
-const isAuthorized = (request, env) => !env.NORTHSTAR_ACCESS_CODE || request.headers.get("X-Access-Code") === env.NORTHSTAR_ACCESS_CODE;
+const isAuthorized = () => true;
 
 async function supabase(request, env, path, options = {}) {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return json({ error: "Memory service is not configured." }, 503);
