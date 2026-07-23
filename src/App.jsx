@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { hasLiveAgentBridge, requestLiveAssessment } from "./agentClient";
+import { memoryApi } from "./memoryClient";
 
 const STORAGE_KEY = "personal-command-center:v1";
 const HOURS = Array.from({ length: 17 }, (_, index) => index + 6);
@@ -172,6 +173,7 @@ function ScheduleRow({ hour, block, editing, onEdit, onSave, onCancel, onToggle 
 }
 
 export function App() {
+  const [accessCode, setAccessCode] = useState(() => sessionStorage.getItem("northstar-access-code") || "");
   const [date, setDate] = useState(localDateKey());
   const [activity, setActivity] = useState("");
   const [analysis, setAnalysis] = useState(null);
@@ -180,6 +182,16 @@ export function App() {
   const [showMission, setShowMission] = useState(false);
   const [showOperatingDraft, setShowOperatingDraft] = useState(false);
   const { store, setStore } = useCommandStore();
+  useEffect(() => {
+    if (!accessCode) return;
+    Promise.all([memoryApi.profile(accessCode), memoryApi.decisions(accessCode), memoryApi.active(accessCode)]).then(([profiles, decisions, active]) => {
+      const profile = profiles?.[0];
+      const mapped = (decisions || []).map((item) => ({ ...item, longTerm: item.long_term_score, shortTerm: item.short_term_score, nextAction: item.next_action, at: item.created_at }));
+      const savedActive = active?.[0] ? { ...active[0], title: active[0].task, startedAt: active[0].started_at } : current.active;
+      setStore((current) => ({ ...current, mission: profile?.mission || current.mission, operatingDraft: profile?.operating_brief?.text || current.operatingDraft, decisions: mapped.length ? mapped : current.decisions, active: savedActive }));
+    }).catch(() => setAccessCode(""));
+  }, [accessCode]);
+  useEffect(() => { if (accessCode) memoryApi.saveProfile(accessCode, { mission: store.mission, operating_brief: { text: store.operatingDraft } }).catch(() => {}); }, [accessCode, store.mission, store.operatingDraft]);
   const day = store.days[date] || emptyDay();
   const blocks = Object.entries(day.blocks || {});
   const completed = blocks.filter(([, block]) => block.done).length;
@@ -200,6 +212,7 @@ export function App() {
           mission: store.mission,
           operatingBrief: store.operatingDraft,
           fallback: localResult,
+          accessCode,
         })) };
         setAgentMode("live");
       } catch {
@@ -209,19 +222,23 @@ export function App() {
     const entry = { id: crypto.randomUUID(), activity: activity.trim(), ...result, at: new Date().toISOString() };
     setAnalysis(entry);
     setStore((current) => ({ ...current, decisions: [entry, ...current.decisions].slice(0, 30) }));
+    if (accessCode) memoryApi.saveDecision(accessCode, entry).catch(() => {});
   };
   const startFocus = () => {
     if (!analysis) return;
-    setStore((current) => ({ ...current, active: { title: analysis.activity, lane: analysis.lane, startedAt: new Date().toISOString() } }));
+    const next = { title: analysis.activity, task: analysis.activity, lane: analysis.lane, startedAt: new Date().toISOString() };
+    setStore((current) => ({ ...current, active: next }));
+    if (accessCode) memoryApi.saveActive(accessCode, { task: next.task, lane: next.lane, started_at: next.startedAt }).catch(() => {});
   };
-  const clearActive = () => setStore((current) => ({ ...current, active: null }));
-  const saveBlock = (hour, block) => { updateDay({ ...day, blocks: { ...day.blocks, [hour]: block } }); setEditingHour(null); };
+  const clearActive = () => { setStore((current) => ({ ...current, active: null })); if (accessCode) memoryApi.saveActive(accessCode, {}).catch(() => {}); };
+  const saveBlock = (hour, block) => { updateDay({ ...day, blocks: { ...day.blocks, [hour]: block } }); if (accessCode) memoryApi.saveDaily(accessCode, { date, hour, task: block.task, lane: block.laneId, done: block.done }).catch(() => {}); setEditingHour(null); };
   const copyYesterday = () => {
     const prior = store.days[shiftDate(date, -1)];
     if (!prior) return;
     updateDay({ ...day, blocks: Object.fromEntries(Object.entries(prior.blocks).map(([hour, block]) => [hour, { ...block, done: false }])) });
   };
 
+  if (!accessCode) return <main className="command-app"><section style={{ maxWidth: 440, margin: "14vh auto", padding: 28 }}><h1>Unlock Northstar</h1><p>Enter your private access code to load your strategy and memory.</p><form onSubmit={(event) => { event.preventDefault(); const value = new FormData(event.currentTarget).get("code")?.toString().trim(); if (value) { sessionStorage.setItem("northstar-access-code", value); setAccessCode(value); } }}><input name="code" type="password" autoFocus placeholder="Access code" style={{ width: "100%", padding: 12, margin: "12px 0" }} /><button type="submit">Open command center</button></form></section></main>;
   return <main className="command-app">
     <aside className="command-sidebar">
       <div className="brand"><span><Flame size={19} /></span><strong>Northstar</strong></div>
