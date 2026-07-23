@@ -181,9 +181,9 @@ export function App() {
   const [editingHour, setEditingHour] = useState(null);
   const [showMission, setShowMission] = useState(false);
   const [showOperatingDraft, setShowOperatingDraft] = useState(false);
+  const [agentStates, setAgentStates] = useState([]);
   const { store, setStore } = useCommandStore();
   useEffect(() => {
-    if (!accessCode) return;
     Promise.all([memoryApi.profile(accessCode), memoryApi.decisions(accessCode), memoryApi.active(accessCode)]).then(([profiles, decisions, active]) => {
       const profile = profiles?.[0];
       const mapped = (decisions || []).map((item) => ({ ...item, longTerm: item.long_term_score, shortTerm: item.short_term_score, nextAction: item.next_action, at: item.created_at }));
@@ -191,7 +191,8 @@ export function App() {
       setStore((current) => ({ ...current, mission: profile?.mission || current.mission, operatingDraft: profile?.operating_brief?.text || current.operatingDraft, decisions: mapped.length ? mapped : current.decisions, active: savedActive }));
     }).catch(() => setAccessCode(""));
   }, [accessCode]);
-  useEffect(() => { if (accessCode) memoryApi.saveProfile(accessCode, { mission: store.mission, operating_brief: { text: store.operatingDraft } }).catch(() => {}); }, [accessCode, store.mission, store.operatingDraft]);
+  useEffect(() => { memoryApi.saveProfile(accessCode, { mission: store.mission, operating_brief: { text: store.operatingDraft } }).catch(() => {}); }, [accessCode, store.mission, store.operatingDraft]);
+  useEffect(() => { memoryApi.agentState(accessCode).then(setAgentStates).catch(() => {}); }, [accessCode]);
   const day = store.days[date] || emptyDay();
   const blocks = Object.entries(day.blocks || {});
   const completed = blocks.filter(([, block]) => block.done).length;
@@ -256,6 +257,7 @@ export function App() {
         <AgentCard icon={Target} title="Strategist" detail="Long-term alignment" state={agentMode === "thinking" ? "Thinking" : "Ready"} tone="teal" />
         <AgentCard icon={Activity} title="Operator" detail="Short-term payoff" state={agentMode === "thinking" ? "Thinking" : "Ready"} tone="blue" />
         <AgentCard icon={LockKeyhole} title="Guardian" detail="Energy and attention" state="Ready" tone="amber" />
+        {agentStates.map((item) => <AgentCard key={item.agent} icon={Bot} title={item.agent} detail={item.current_task || item.detail || "No task queued"} state={item.status || "idle"} tone="blue" />)}
       </section>
       <p className="local-note">Private by default. Your decisions stay on this device until you connect a secure agent bridge.</p>
     </aside>

@@ -18,4 +18,6 @@ export const memoryApi = {
   saveDaily: (code, data) => request(code, "/daily", { method: "PUT", body: JSON.stringify(data) }),
   active: (code) => request(code, "/active-focus"),
   saveActive: (code, data) => request(code, "/active-focus", { method: "PUT", body: JSON.stringify(data) }),
+  agentState: (code) => request(code, "/state"),
+  saveAgentState: (code, agent, data) => request(code, `/state/${encodeURIComponent(agent)}`, { method: "PUT", body: JSON.stringify(data) }),
 };

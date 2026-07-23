@@ -31,6 +31,17 @@ async function supabase(request, env, path, options = {}) {
 async function memory(request, env, url) {
   if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
   const path = url.pathname.replace("/api/memory/", "");
+  if (path === "state" && request.method === "GET") {
+    const result = await supabase(request, env, "northstar_agent_state?select=*&order=agent.asc");
+    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+  }
+  if (path.startsWith("state/") && request.method === "PUT") {
+    const agent = path.split("/")[1];
+    if (!['richard', 'claude', 'codex', 'hermes', 'openclaw'].includes(agent)) return json({ error: "Unknown agent." }, 400);
+    const body = await request.json();
+    const result = await supabase(request, env, "northstar_agent_state?on_conflict=agent", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ agent, current_task: body.current_task || null, status: body.status || 'idle', detail: body.detail || null, blocked_reason: body.blocked_reason || null, updated_at: new Date().toISOString() }) });
+    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+  }
   if (path === "profile") {
     if (request.method === "GET") {
       const result = await supabase(request, env, `northstar_profiles?owner_key=eq.${ownerKey}&select=mission,operating_brief`);
