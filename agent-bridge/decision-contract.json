@@ -1,0 +1,17 @@
+{
+  "request": {
+    "activity": "Build a reusable creator outreach workflow",
+    "mission": "Build a durable AI-first company by turning recurring work into reusable systems, products, and knowledge.",
+    "fallback": { "longTerm": 9, "shortTerm": 5, "lane": "automation", "verdict": "Do now" }
+  },
+  "response": {
+    "longTerm": 9,
+    "shortTerm": 6,
+    "lane": "automation",
+    "verdict": "Do now",
+    "reason": "This creates a reusable system and directly improves creator outreach.",
+    "nextAction": "Define the first working version that can generate and save one outreach draft.",
+    "agent": "Hermes Strategist",
+    "source": "live"
+  }
+}

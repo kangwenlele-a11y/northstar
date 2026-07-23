@@ -1,0 +1,21 @@
+{
+  "name": "daily-control-tower",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "agent": "node server/agent-bridge.mjs",
+    "build": "vite build",
+    "build:hosted": "vite build --mode hosted && node scripts/package-worker.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "lucide-react": "latest"
+  },
+  "devDependencies": {}
+}
