@@ -182,6 +182,8 @@ export function App() {
   const [showMission, setShowMission] = useState(false);
   const [showOperatingDraft, setShowOperatingDraft] = useState(false);
   const [agentStates, setAgentStates] = useState([]);
+  const [goal, setGoal] = useState("");
+  const [planning, setPlanning] = useState(false);
   const { store, setStore } = useCommandStore();
   useEffect(() => {
     Promise.all([memoryApi.profile(accessCode), memoryApi.decisions(accessCode), memoryApi.active(accessCode)]).then(([profiles, decisions, active]) => {
@@ -238,6 +240,12 @@ export function App() {
     if (!prior) return;
     updateDay({ ...day, blocks: Object.fromEntries(Object.entries(prior.blocks).map(([hour, block]) => [hour, { ...block, done: false }])) });
   };
+  const createPlan = async (event) => {
+    event.preventDefault();
+    if (!goal.trim()) return;
+    setPlanning(true);
+    try { await memoryApi.plan(accessCode, goal.trim(), store.operatingDraft); setGoal(""); } finally { setPlanning(false); }
+  };
 
   return <main className="command-app">
     <aside className="command-sidebar">
@@ -275,6 +283,10 @@ export function App() {
         </button>
         {showOperatingDraft && <div className="draft-body"><div className="strategy-lens"><span>Priority lens</span><strong>AI automation → cash-flow learning → English / software → self-improvement</strong><small>AI-assisted investing stays low priority until your controlled businesses are stronger.</small></div><textarea value={store.operatingDraft} onChange={(event) => setStore((current) => ({ ...current, operatingDraft: event.target.value }))} aria-label="Operating brief draft" /></div>}
       </section>
+      <form className="activity-form" onSubmit={createPlan}>
+        <label htmlFor="goal">What are you trying to achieve?</label>
+        <div className="activity-row"><input id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="Describe one outcome to plan" /><button type="submit" disabled={planning}>{planning ? "Planning..." : "Build plan"}</button></div>
+      </form>
 
       {activeLane && <section className="active-strip" style={{ "--active": activeLane.color }}><CircleDot size={16} /><span>In focus now</span><strong>{store.active.title}</strong><button onClick={clearActive}>End focus</button></section>}
 

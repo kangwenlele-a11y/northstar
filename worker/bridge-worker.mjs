@@ -131,6 +131,28 @@ async function assess(request, env) {
   }
 }
 
+async function createPlan(request, env) {
+  const body = await request.json();
+  const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+  const operatingBrief = typeof body.operatingBrief === "string" ? body.operatingBrief.trim() : "";
+  if (goal.length < 3 || goal.length > 500 || operatingBrief.length < 100) return json({ error: "Provide a valid goal and operating brief." }, 400);
+  const prompt = `Given this goal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nReturn only JSON array of 3-8 ordered steps. Each object: title, detail, estimated_minutes, lane (agency|art|creatorconnect|personal|codex|hermes|openclaw), depends_on (prior step index or null).`;
+  const upstream = await fetch("https://api.siliconflow.cn/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.SILICONFLOW_API_KEY}` }, body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 700, temperature: 0.2, enable_thinking: false }) });
+  if (!upstream.ok) return json({ error: "Planner unavailable." }, 502);
+  const payload = await upstream.json();
+  let steps;
+  try { steps = JSON.parse(payload?.choices?.[0]?.message?.content?.replace(/^```json\s*|^```|```$/gm, "").trim()); } catch { return json({ error: "Planner returned invalid steps." }, 502); }
+  if (!Array.isArray(steps) || !steps.length) return json({ error: "Planner returned no steps." }, 502);
+  const goalResponse = await supabase(request, env, "northstar_goals", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "return=representation" }, body: JSON.stringify({ title: goal }) });
+  const goals = await goalResponse.json(); const goalId = goals?.[0]?.id;
+  const today = new Date(); let hour = Math.max(9, today.getHours() + 1); let day = today.toISOString().slice(0, 10); const scheduled=[];
+  for (let index=0; index<Math.min(8, steps.length); index++) { const step=steps[index]; if(hour>21){ today.setDate(today.getDate()+1); day=today.toISOString().slice(0,10); hour=9; }
+    const lane = ["agency","art","creatorconnect","personal","codex","hermes","openclaw"].includes(step.lane) ? step.lane : "personal";
+    await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method:"POST", headers:{"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"}, body:JSON.stringify({owner_key:ownerKey,date:day,hour,task:`${step.title}: ${step.detail}`,lane,goal_id:goalId,depends_on:Number.isInteger(step.depends_on)?step.depends_on:null,done:false}) });
+    scheduled.push({ ...step, date:day, hour }); if (["codex","hermes","openclaw"].includes(lane)) await supabase(request, env, "northstar_agent_state?on_conflict=agent", {method:"POST",headers:{"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"},body:JSON.stringify({agent:lane,current_task:step.title,status:"idle",detail:step.detail,updated_at:new Date().toISOString()})}); hour += Math.max(1, Math.ceil((Number(step.estimated_minutes)||60)/60)); }
+  return json({ goal_id:goalId, steps:scheduled });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -139,6 +161,7 @@ export default {
       if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
       return assess(request, env);
     }
+    if (url.pathname === "/api/plan") { if (request.method !== "POST") return json({ error: "Method not allowed." }, 405); return createPlan(request, env); }
     if (url.pathname.startsWith("/api/memory/")) return memory(request, env, url);
     return new Response(appHtml, {
       headers: {
