@@ -238,7 +238,6 @@ export function App() {
     updateDay({ ...day, blocks: Object.fromEntries(Object.entries(prior.blocks).map(([hour, block]) => [hour, { ...block, done: false }])) });
   };
 
-  if (!accessCode) return <main className="command-app"><section style={{ maxWidth: 440, margin: "14vh auto", padding: 28 }}><h1>Unlock Northstar</h1><p>Enter your private access code to load your strategy and memory.</p><form onSubmit={(event) => { event.preventDefault(); const value = new FormData(event.currentTarget).get("code")?.toString().trim(); if (value) { sessionStorage.setItem("northstar-access-code", value); setAccessCode(value); } }}><input name="code" type="password" autoFocus placeholder="Access code" style={{ width: "100%", padding: 12, margin: "12px 0" }} /><button type="submit">Open command center</button></form></section></main>;
   return <main className="command-app">
     <aside className="command-sidebar">
       <div className="brand"><span><Flame size={19} /></span><strong>Northstar</strong></div>
