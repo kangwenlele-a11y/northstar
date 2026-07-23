@@ -16,10 +16,11 @@ async function assess(request, env) {
   try { body = await request.json(); } catch { return json({ error: "Invalid request." }, 400); }
   const activity = typeof body.activity === "string" ? body.activity.trim() : "";
   const mission = typeof body.mission === "string" ? body.mission.trim() : "";
+  const operatingBrief = typeof body.operatingBrief === "string" ? body.operatingBrief.trim() : "";
   const fallback = body.fallback;
-  if (activity.length < 3 || activity.length > 1200 || mission.length < 10 || mission.length > 5000 || !fallback) return json({ error: "Provide a valid activity and mission." }, 400);
+  if (activity.length < 3 || activity.length > 1200 || mission.length < 10 || mission.length > 5000 || operatingBrief.length < 100 || operatingBrief.length > 12000 || !fallback) return json({ error: "Provide a valid activity and operating brief." }, 400);
 
-  const prompt = `You are the Northstar Strategist for a founder building an AI-first automation company. Assess one activity against this mission:\n${mission}\n\nActivity: ${activity}\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move). Be direct. Prioritize reusable systems, automation, software, data, and learning. Treat e-commerce work as cash flow and a testing environment. Keep investing low priority unless essential. Do not use markdown.`;
+  const prompt = `You are the Northstar Strategist for a founder building an AI-first automation company. Use the full operating brief as the source of truth, not just the short mission.\n\nShort mission:\n${mission}\n\nFull operating brief:\n${operatingBrief}\n\nActivity: ${activity}\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move). Be direct. Prioritize reusable systems, automation, software, data, and learning. Treat e-commerce work as cash flow and a testing environment. Keep investing low priority unless essential. Do not use markdown.`;
   try {
     const upstream = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
       method: "POST",

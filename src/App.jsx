@@ -195,7 +195,12 @@ export function App() {
     let result = localResult;
     if (hasLiveAgentBridge()) {
       try {
-        result = { ...localResult, ...(await requestLiveAssessment({ activity: activity.trim(), mission: store.mission, fallback: localResult })) };
+        result = { ...localResult, ...(await requestLiveAssessment({
+          activity: activity.trim(),
+          mission: store.mission,
+          operatingBrief: store.operatingDraft,
+          fallback: localResult,
+        })) };
         setAgentMode("live");
       } catch {
         setAgentMode("fallback");
