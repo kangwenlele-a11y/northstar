@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const source = resolve("worker/bridge-worker.mjs");
@@ -18,6 +18,12 @@ const style = readFileSync(resolve("dist", styleMatch[1].replace(/^\//, "")), "u
 const appHtml = page
   .replace(styleMatch[0], `<style>${style}</style>`)
   .replace(scriptMatch[0], `<script type="module">${script}</script>`);
+
+// Sites serves browser assets from dist/client while routing /api to the worker.
+const clientDir = resolve("dist/client");
+mkdirSync(clientDir, { recursive: true });
+cpSync(resolve("dist/index.html"), resolve(clientDir, "index.html"));
+cpSync(resolve("dist/assets"), resolve(clientDir, "assets"), { recursive: true });
 
 mkdirSync(destinationDir, { recursive: true });
 const worker = readFileSync(source, "utf8");
