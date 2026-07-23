@@ -11,7 +11,10 @@ export async function requestLiveAssessment({ activity, mission, operatingBrief,
     headers: { "Content-Type": "application/json", "X-Access-Code": accessCode },
     body: JSON.stringify({ activity, mission, operatingBrief, fallback }),
   });
-  if (!response.ok) throw new Error("The agent bridge did not accept this request.");
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "AI unavailable. The agent bridge request failed.");
+  }
   const result = await response.json();
   if (!result || typeof result !== "object") throw new Error("The agent bridge returned an invalid response.");
   return result;

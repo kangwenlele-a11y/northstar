@@ -111,7 +111,11 @@ async function assess(request, env) {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.SILICONFLOW_API_KEY}` },
       body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 180, temperature: 0.2, enable_thinking: false }),
     });
-    if (!upstream.ok) return json({ error: "The live agent is temporarily unavailable." }, 502);
+    if (!upstream.ok) {
+      const errorBody = await upstream.text();
+      console.error("SiliconFlow assessment failed", { status: upstream.status, body: errorBody.slice(0, 2000) });
+      return json({ error: "AI unavailable. The live Strategist could not reach SiliconFlow." }, 502);
+    }
     const payload = await upstream.json();
     const content = payload?.choices?.[0]?.message?.content;
     if (typeof content !== "string") return json({ error: "The live agent returned no assessment." }, 502);
@@ -126,8 +130,9 @@ async function assess(request, env) {
       agent: "Northstar Strategist",
       source: "live",
     });
-  } catch {
-    return json({ error: "The live agent is temporarily unavailable." }, 502);
+  } catch (error) {
+    console.error("SiliconFlow assessment exception", { message: error instanceof Error ? error.message : String(error) });
+    return json({ error: "AI unavailable. The live Strategist request failed." }, 502);
   }
 }
 

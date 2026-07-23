@@ -177,6 +177,7 @@ export function App() {
   const [date, setDate] = useState(localDateKey());
   const [activity, setActivity] = useState("");
   const [analysis, setAnalysis] = useState(null);
+  const [agentError, setAgentError] = useState("");
   const [agentMode, setAgentMode] = useState(hasLiveAgentBridge() ? "ready" : "local");
   const [editingHour, setEditingHour] = useState(null);
   const [showMission, setShowMission] = useState(false);
@@ -206,8 +207,9 @@ export function App() {
   const runAnalysis = async () => {
     if (!activity.trim()) return;
     const localResult = scoreActivity(activity);
+    setAgentError("");
     setAgentMode(hasLiveAgentBridge() ? "thinking" : "local");
-    let result = localResult;
+    let result;
     if (hasLiveAgentBridge()) {
       try {
         result = { ...localResult, ...(await requestLiveAssessment({
@@ -218,8 +220,10 @@ export function App() {
           accessCode,
         })) };
         setAgentMode("live");
-      } catch {
-        setAgentMode("fallback");
+      } catch (error) {
+        setAgentMode("error");
+        setAgentError(error instanceof Error ? error.message : "AI unavailable.");
+        return;
       }
     }
     const entry = { id: crypto.randomUUID(), activity: activity.trim(), ...result, at: new Date().toISOString() };
@@ -293,6 +297,7 @@ export function App() {
       <section className="capture-panel">
         <div className="capture-heading"><div><span className="pulse-dot" />LIVE INPUT</div><small>Update this whenever your attention changes.</small></div>
         <div className="capture-form"><textarea value={activity} onChange={(event) => setActivity(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") runAnalysis(); }} placeholder="I am about to spend time on..." aria-label="What are you doing right now" /><button className="analyze-button" onClick={runAnalysis} disabled={agentMode === "thinking"}><Sparkles size={17} /> {agentMode === "thinking" ? "Agents thinking" : "Ask the agents"} <ArrowRight size={16} /></button></div>
+        {agentError && <p role="alert" style={{ color: "#b42318", margin: "12px 0 0" }}>{agentError}</p>}
         <div className="capture-prompts"><span>Try:</span><button onClick={() => setActivity("Spend two hours manually uploading product listings")}>Manual product work</button><button onClick={() => setActivity("Build a reusable creator outreach workflow")}>Build outreach system</button><button onClick={() => setActivity("Scroll Instagram for inspiration")}>Scroll for inspiration</button></div>
       </section>
 
