@@ -29,6 +29,7 @@ async function supabase(request, env, path, options = {}) {
 }
 
 async function memory(request, env, url) {
+  try {
   if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
   const path = url.pathname.replace("/api/memory/", "");
   if (path === "state" && request.method === "GET") {
@@ -91,7 +92,15 @@ async function memory(request, env, url) {
       return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
     }
   }
-  return json({ error: "Not found." }, 404);
+    return json({ error: "Not found." }, 404);
+  } catch (error) {
+    console.error("Northstar memory route failed", error);
+    return json({
+      error: "Unhandled memory route error",
+      detail: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    }, 500);
+  }
 }
 
 async function assess(request, env) {
