@@ -2,6 +2,8 @@
 
 A local-first daily routine planner built with React and Vite.
 
+Northstar is the schedule and personal command-center project.
+
 ## Run
 
 ```powershell
