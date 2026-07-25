@@ -16,15 +16,25 @@ const isAuthorized = () => true;
 async function supabase(request, env, path, options = {}) {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return json({ error: "Memory service is not configured." }, 503);
   const baseUrl = env.SUPABASE_URL.replace(/\/rest\/v1\/?$/, "").replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}/rest/v1/${path}`, {
-    ...options,
-    headers: {
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-      ...(options.headers || {}),
-    },
-  });
-  if (!response.ok) return json({ error: "Memory service request failed." }, 502);
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/rest/v1/${path}`, {
+      ...options,
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        ...(options.headers || {}),
+      },
+    });
+  } catch (error) {
+    console.error("Supabase fetch exception", { message: error instanceof Error ? error.message : String(error) });
+    return json({ error: "Memory service network error.", detail: error instanceof Error ? error.message : String(error) }, 502);
+  }
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => "");
+    console.error("Supabase non-ok response", { status: response.status, body: errorBody.slice(0, 2000) });
+    return json({ error: "Memory service request failed.", detail: errorBody.slice(0, 2000) }, response.status);
+  }
   return response;
 }
 
@@ -169,19 +179,28 @@ async function createPlan(request, env) {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.pathname === "/api/decision-assessments") {
-      if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-      if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
-      return assess(request, env);
+    try {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/decision-assessments") {
+        if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+        if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
+        return assess(request, env);
+      }
+      if (url.pathname === "/api/plan") { if (request.method !== "POST") return json({ error: "Method not allowed." }, 405); return createPlan(request, env); }
+      if (url.pathname.startsWith("/api/memory/")) return memory(request, env, url);
+      return new Response(appHtml, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch (error) {
+      console.error("Northstar worker top-level exception", error);
+      return json({
+        error: "Unhandled worker error",
+        detail: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      }, 500);
     }
-    if (url.pathname === "/api/plan") { if (request.method !== "POST") return json({ error: "Method not allowed." }, 405); return createPlan(request, env); }
-    if (url.pathname.startsWith("/api/memory/")) return memory(request, env, url);
-    return new Response(appHtml, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store",
-      },
-    });
   },
 };

@@ -1,6 +1,6 @@
 create table if not exists northstar_profiles (
   id uuid primary key default gen_random_uuid(),
-  owner_key text not null unique,
+  owner_key text not null,
   mission text,
   operating_brief jsonb,
   updated_at timestamptz default now()
