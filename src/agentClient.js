@@ -4,12 +4,12 @@ export function hasLiveAgentBridge() {
   return true;
 }
 
-export async function requestLiveAssessment({ activity, mission, operatingBrief, fallback, accessCode }) {
-  const endpoint = bridgeUrl ? `${bridgeUrl}/v1/decision-assessments` : "/api/decision-assessments";
+export async function requestLiveAssessment({ activity, mission, operatingBrief, fallback, accessCode, mode = "quick" }) {
+  const endpoint = bridgeUrl ? `${bridgeUrl}/v1/analyze` : "/api/analyze";
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Access-Code": accessCode },
-    body: JSON.stringify({ activity, mission, operatingBrief, fallback }),
+    body: JSON.stringify({ activity, mission, operatingBrief, fallback, mode }),
   });
   if (!response.ok) {
     const error = await response.json().catch(() => null);

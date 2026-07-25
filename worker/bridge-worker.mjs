@@ -13,6 +13,29 @@ const score = (value, fallback) => Number.isFinite(Number(value)) ? Math.max(1, 
 
 const isAuthorized = () => true;
 
+async function callDeepSeek(prompt, maxTokens, env) {
+  if (!env.SILICONFLOW_API_KEY) return json({ error: "The live agent has not been configured." }, 503);
+  try {
+    const upstream = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.SILICONFLOW_API_KEY}` },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens, temperature: 0.2, enable_thinking: false }),
+    });
+    if (!upstream.ok) {
+      const errorBody = await upstream.text();
+      console.error("DeepSeek call failed", { status: upstream.status, body: errorBody.slice(0, 2000) });
+      return null;
+    }
+    const payload = await upstream.json();
+    const content = payload?.choices?.[0]?.message?.content;
+    if (typeof content !== "string") return null;
+    return content.replace(/^```json\s*|^```|```$/gm, "").trim();
+  } catch (error) {
+    console.error("DeepSeek exception", { message: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
+}
+
 async function supabase(request, env, path, options = {}) {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return json({ error: "Memory service is not configured." }, 503);
   const baseUrl = env.SUPABASE_URL.replace(/\/rest\/v1\/?$/, "").replace(/\/$/, "");
@@ -124,35 +147,89 @@ async function assess(request, env) {
   if (activity.length < 3 || activity.length > 1200 || mission.length < 10 || mission.length > 5000 || operatingBrief.length < 100 || operatingBrief.length > 12000 || !fallback) return json({ error: "Provide a valid activity and operating brief." }, 400);
 
   const prompt = `You are the Northstar Strategist for a founder building an AI-first automation company. Use the full operating brief as the source of truth, not just the short mission.\n\nShort mission:\n${mission}\n\nFull operating brief:\n${operatingBrief}\n\nActivity: ${activity}\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move). Be direct. Prioritize reusable systems, automation, software, data, and learning. Treat e-commerce work as cash flow and a testing environment. Keep investing low priority unless essential. Do not use markdown.`;
+  const raw = await callDeepSeek(prompt, 180, env);
+  if (!raw) return json({ error: "AI unavailable. The live Strategist could not be reached." }, 502);
+  const answer = parseAssessment(raw);
+  if (!answer) return json({ error: "The live agent returned an invalid assessment." }, 502);
+  return json({
+    longTerm: score(answer.longTerm, score(fallback.longTerm, 5)),
+    shortTerm: score(answer.shortTerm, score(fallback.shortTerm, 5)),
+    lane: lanes.has(answer.lane) ? answer.lane : fallback.lane,
+    verdict: verdicts.has(answer.verdict) ? answer.verdict : fallback.verdict,
+    reason: typeof answer.reason === "string" ? answer.reason.slice(0, 480) : fallback.reason,
+    nextAction: typeof answer.nextAction === "string" ? answer.nextAction.slice(0, 300) : fallback.nextAction,
+    agent: "Northstar Strategist",
+    source: "live",
+  });
+}
+
+function parseAssessment(raw) {
   try {
-    const upstream = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.SILICONFLOW_API_KEY}` },
-      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 180, temperature: 0.2, enable_thinking: false }),
-    });
-    if (!upstream.ok) {
-      const errorBody = await upstream.text();
-      console.error("SiliconFlow assessment failed", { status: upstream.status, body: errorBody.slice(0, 2000) });
-      return json({ error: "AI unavailable. The live Strategist could not reach SiliconFlow." }, 502);
-    }
-    const payload = await upstream.json();
-    const content = payload?.choices?.[0]?.message?.content;
-    if (typeof content !== "string") return json({ error: "The live agent returned no assessment." }, 502);
-    const answer = JSON.parse(content.replace(/^```json\s*|^```|```$/gm, "").trim());
-    return json({
-      longTerm: score(answer.longTerm, score(fallback.longTerm, 5)),
-      shortTerm: score(answer.shortTerm, score(fallback.shortTerm, 5)),
-      lane: lanes.has(answer.lane) ? answer.lane : fallback.lane,
-      verdict: verdicts.has(answer.verdict) ? answer.verdict : fallback.verdict,
-      reason: typeof answer.reason === "string" ? answer.reason.slice(0, 480) : fallback.reason,
-      nextAction: typeof answer.nextAction === "string" ? answer.nextAction.slice(0, 300) : fallback.nextAction,
-      agent: "Northstar Strategist",
-      source: "live",
-    });
-  } catch (error) {
-    console.error("SiliconFlow assessment exception", { message: error instanceof Error ? error.message : String(error) });
-    return json({ error: "AI unavailable. The live Strategist request failed." }, 502);
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.longTerm === "number" && typeof parsed.verdict === "string") return parsed;
+  } catch {}
+  return null;
+}
+
+async function analyze(request, env) {
+  if (!env.SILICONFLOW_API_KEY) return json({ error: "The live agent has not been configured." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "Invalid request." }, 400); }
+  const activity = typeof body.activity === "string" ? body.activity.trim() : "";
+  const mission = typeof body.mission === "string" ? body.mission.trim() : "";
+  const operatingBrief = typeof body.operatingBrief === "string" ? body.operatingBrief.trim() : "";
+  const fallback = body.fallback;
+  const mode = body.mode === "deep" ? "deep" : "quick";
+  if (activity.length < 3 || activity.length > 1200 || mission.length < 10 || mission.length > 5000 || operatingBrief.length < 100 || operatingBrief.length > 12000 || !fallback) return json({ error: "Provide a valid activity and operating brief." }, 400);
+
+  const draftPrompt = `You are the Northstar Strategist for a founder building an AI-first automation company. Use the full operating brief as the source of truth, not just the short mission.\n\nShort mission:\n${mission}\n\nFull operating brief:\n${operatingBrief}\n\nActivity: ${activity}\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move). Be direct. Prioritize reusable systems, automation, software, data, and learning. Treat e-commerce work as cash flow and a testing environment. Keep investing low priority unless essential. Do not use markdown.`;
+
+  const draftRaw = await callDeepSeek(draftPrompt, 180, env);
+  if (!draftRaw) return json({ error: "AI unavailable. The live Strategist could not produce a draft." }, 502);
+  const draft = parseAssessment(draftRaw);
+  if (!draft) return json({ error: "The live agent returned an invalid draft." }, 502);
+
+  const scoreResult = (raw) => ({
+    longTerm: score(raw.longTerm, score(fallback.longTerm, 5)),
+    shortTerm: score(raw.shortTerm, score(fallback.shortTerm, 5)),
+    lane: lanes.has(raw.lane) ? raw.lane : fallback.lane,
+    verdict: verdicts.has(raw.verdict) ? raw.verdict : fallback.verdict,
+    reason: typeof raw.reason === "string" ? raw.reason.slice(0, 480) : fallback.reason,
+    nextAction: typeof raw.nextAction === "string" ? raw.nextAction.slice(0, 300) : fallback.nextAction,
+  });
+
+  if (mode === "quick") {
+    return json({ final: scoreResult(draft), draft: null, critique: null, changed: false });
   }
+
+  const critiquePrompt = `You are a critical reviewer for the Northstar decision system. Given the original question, the operating brief, and the draft assessment below, identify specific flaws.\n\nOriginal question: ${activity}\n\nOperating brief:\n${operatingBrief}\n\nDraft assessment:\n${JSON.stringify(draft)}\n\nFind at least one concrete issue among:\n1. Wrong niche/lane assignment — does the suggested lane match the activity and stated priorities?\n2. Missed dependencies — does the plan assume things that are not in place?\n3. Unrealistic timeboxing — is the suggested next action achievable in 30-60 minutes?\n4. Contradictions with stated priorities — does the verdict contradict the operating brief?\n\nReturn only valid JSON with exactly: objections (array of strings, each a concise concrete issue), severity ("minor"|"major"|"critical"), suggestedDirection (string describing what should change, or null). Do not rubber-stamp — find real problems.`;
+
+  const critiqueRaw = await callDeepSeek(critiquePrompt, 300, env);
+  let critique = { objections: ["Critique could not be generated."], severity: "minor", suggestedDirection: null };
+  if (critiqueRaw) {
+    try {
+      const parsed = JSON.parse(critiqueRaw);
+      if (parsed && Array.isArray(parsed.objections)) critique = parsed;
+    } catch {}
+  }
+
+  const synthesisPrompt = `You are the final decision-maker for the Northstar system. Consider the original question, the draft assessment, and the critique below. Produce the best final verdict.\n\nOriginal question: ${activity}\n\nOperating brief:\n${operatingBrief}\n\nDraft:\n${JSON.stringify(draft)}\n\nCritique:\n${JSON.stringify(critique)}\n\nIf the critique raised valid points, adjust your answer. If not, the draft stands.\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move), addressedCritique (boolean), finalReasoning (string explaining how the critique changed or did not change the answer). Do not use markdown.`;
+
+  const synthesisRaw = await callDeepSeek(synthesisPrompt, 300, env);
+  if (!synthesisRaw) return json({ error: "AI unavailable. The live Strategist could not produce a synthesis." }, 502);
+  const synthesis = parseAssessment(synthesisRaw);
+  if (!synthesis) return json({ error: "The live agent returned an invalid synthesis." }, 502);
+
+  const final = scoreResult(synthesis);
+  const draftResult = scoreResult(draft);
+  const changed = draftResult.verdict !== final.verdict || draftResult.lane !== final.lane;
+
+  return json({
+    final,
+    draft: draftResult,
+    critique: critique.objections.join(" "),
+    changed,
+  });
 }
 
 async function createPlan(request, env) {
@@ -185,6 +262,11 @@ export default {
         if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
         if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
         return assess(request, env);
+      }
+      if (url.pathname === "/api/analyze") {
+        if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+        if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
+        return analyze(request, env);
       }
       if (url.pathname === "/api/plan") { if (request.method !== "POST") return json({ error: "Method not allowed." }, 405); return createPlan(request, env); }
       if (url.pathname.startsWith("/api/memory/")) return memory(request, env, url);
