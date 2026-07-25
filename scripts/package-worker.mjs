@@ -16,8 +16,12 @@ if (!scriptMatch || !styleMatch) throw new Error("Could not locate the built app
 const script = readFileSync(resolve("dist", scriptMatch[1].replace(/^\//, "")), "utf8");
 const style = readFileSync(resolve("dist", styleMatch[1].replace(/^\//, "")), "utf8");
 const appHtml = page
-  .replace(styleMatch[0], `<style>${style}</style>`)
-  .replace(scriptMatch[0], `<script type="module">${script}</script>`);
+  .replace(styleMatch[0], () => `<style>${style}</style>`)
+  .replace(
+    scriptMatch[0],
+    () =>
+      `<script type="module">${script.replace(/<\/script>/gi, "<\\/script>")}</script>`
+  );
 
 // Sites serves browser assets from dist/client while routing /api to the worker.
 const clientDir = resolve("dist/client");
@@ -29,5 +33,8 @@ mkdirSync(destinationDir, { recursive: true });
 const worker = readFileSync(source, "utf8");
 writeFileSync(
   resolve(destinationDir, "index.js"),
-  worker.replace("/* __NORTHSTAR_APP_HTML__ */", `const appHtml = ${JSON.stringify(appHtml)};`),
+  worker.replace(
+    "/* __NORTHSTAR_APP_HTML__ */",
+    () => `const appHtml = ${JSON.stringify(appHtml)};`,
+  ),
 );
