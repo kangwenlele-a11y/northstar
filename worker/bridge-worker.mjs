@@ -12,6 +12,13 @@ const json = (value, status = 200) => new Response(JSON.stringify(value), {
 
 const score = (value, fallback) => Number.isFinite(Number(value)) ? Math.max(1, Math.min(10, Math.round(Number(value)))) : fallback;
 
+// Every agent route shares one wall-clock budget. Browsers give up on this
+// Worker at roughly 22s, so a request that outlives the budget is useless even
+// if it eventually succeeds — better to return a readable 504.
+const AGENT_BUDGET_MS = 18000;
+const startBudget = () => Date.now() + AGENT_BUDGET_MS;
+const remainingMs = (deadline) => Math.max(1000, deadline - Date.now());
+
 const isAuthorized = () => true;
 
 class DeepSeekTimeout extends Error {}
@@ -158,7 +165,7 @@ async function assess(request, env) {
   if (activity.length < 3 || activity.length > 1200 || mission.length < 10 || mission.length > 5000 || operatingBrief.length < 100 || operatingBrief.length > 12000 || !fallback) return json({ error: "Provide a valid activity and operating brief." }, 400);
 
   const prompt = `You are the Northstar Strategist for a founder building an AI-first automation company. Use the full operating brief as the source of truth, not just the short mission.\n\nShort mission:\n${mission}\n\nFull operating brief:\n${operatingBrief}\n\nActivity: ${activity}\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move). Be direct. Prioritize reusable systems, automation, software, data, and learning. Treat e-commerce work as cash flow and a testing environment. Keep investing low priority unless essential. Do not use markdown.`;
-  const raw = await callDeepSeek(prompt, 180, env);
+  const raw = await callDeepSeek(prompt, 180, env, remainingMs(startBudget()));
   if (!raw) return json({ error: "AI unavailable. The live Strategist could not be reached." }, 502);
   const answer = parseAssessment(raw);
   if (!answer) return json({ error: "The live agent returned an invalid assessment." }, 502);
@@ -195,7 +202,9 @@ async function analyze(request, env) {
 
   const draftPrompt = `You are the Northstar Strategist for a founder building an AI-first automation company. Use the full operating brief as the source of truth, not just the short mission.\n\nShort mission:\n${mission}\n\nFull operating brief:\n${operatingBrief}\n\nActivity: ${activity}\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move). Be direct. Prioritize reusable systems, automation, software, data, and learning. Treat e-commerce work as cash flow and a testing environment. Keep investing low priority unless essential. Do not use markdown.`;
 
-  const draftRaw = await callDeepSeek(draftPrompt, 180, env);
+  // One budget spans all three passes, not 18s each.
+  const deadline = startBudget();
+  const draftRaw = await callDeepSeek(draftPrompt, 180, env, remainingMs(deadline));
   if (!draftRaw) return json({ error: "AI unavailable. The live Strategist could not produce a draft." }, 502);
   const draft = parseAssessment(draftRaw);
   if (!draft) return json({ error: "The live agent returned an invalid draft." }, 502);
@@ -215,7 +224,7 @@ async function analyze(request, env) {
 
   const critiquePrompt = `You are a critical reviewer for the Northstar decision system. Given the original question, the operating brief, and the draft assessment below, identify specific flaws.\n\nOriginal question: ${activity}\n\nOperating brief:\n${operatingBrief}\n\nDraft assessment:\n${JSON.stringify(draft)}\n\nFind at least one concrete issue among:\n1. Wrong niche/lane assignment — does the suggested lane match the activity and stated priorities?\n2. Missed dependencies — does the plan assume things that are not in place?\n3. Unrealistic timeboxing — is the suggested next action achievable in 30-60 minutes?\n4. Contradictions with stated priorities — does the verdict contradict the operating brief?\n\nReturn only valid JSON with exactly: objections (array of strings, each a concise concrete issue), severity ("minor"|"major"|"critical"), suggestedDirection (string describing what should change, or null). Do not rubber-stamp — find real problems.`;
 
-  const critiqueRaw = await callDeepSeek(critiquePrompt, 300, env);
+  const critiqueRaw = await callDeepSeek(critiquePrompt, 300, env, remainingMs(deadline));
   let critique = { objections: ["Critique could not be generated."], severity: "minor", suggestedDirection: null };
   if (critiqueRaw) {
     try {
@@ -226,7 +235,7 @@ async function analyze(request, env) {
 
   const synthesisPrompt = `You are the final decision-maker for the Northstar system. Consider the original question, the draft assessment, and the critique below. Produce the best final verdict.\n\nOriginal question: ${activity}\n\nOperating brief:\n${operatingBrief}\n\nDraft:\n${JSON.stringify(draft)}\n\nCritique:\n${JSON.stringify(critique)}\n\nIf the critique raised valid points, adjust your answer. If not, the draft stands.\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move), addressedCritique (boolean), finalReasoning (string explaining how the critique changed or did not change the answer). Do not use markdown.`;
 
-  const synthesisRaw = await callDeepSeek(synthesisPrompt, 300, env);
+  const synthesisRaw = await callDeepSeek(synthesisPrompt, 300, env, remainingMs(deadline));
   if (!synthesisRaw) return json({ error: "AI unavailable. The live Strategist could not produce a synthesis." }, 502);
   const synthesis = parseAssessment(synthesisRaw);
   if (!synthesis) return json({ error: "The live agent returned an invalid synthesis." }, 502);
@@ -244,17 +253,21 @@ async function analyze(request, env) {
 }
 
 async function createPlan(request, env) {
-  const body = await request.json();
+  if (!env.SILICONFLOW_API_KEY) return json({ error: "The live agent has not been configured." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "Invalid request." }, 400); }
   const goal = typeof body.goal === "string" ? body.goal.trim() : "";
   const operatingBrief = typeof body.operatingBrief === "string" ? body.operatingBrief.trim() : "";
   if (goal.length < 3 || goal.length > 500 || operatingBrief.length < 100) return json({ error: "Provide a valid goal and operating brief." }, 400);
-  const prompt = `Given this goal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nReturn only JSON array of 3-8 ordered steps. Each object: title, detail, estimated_minutes, lane (agency|art|creatorconnect|personal|codex|hermes|openclaw), depends_on (prior step index or null).`;
-  const upstream = await fetch("https://api.siliconflow.cn/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.SILICONFLOW_API_KEY}` }, body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 700, temperature: 0.2, enable_thinking: false }) });
-  if (!upstream.ok) return json({ error: "Planner unavailable." }, 502);
-  const payload = await upstream.json();
+  // detail was previously unbounded, so output landed on the max_tokens ceiling
+  // and truncated mid-JSON, surfacing as "Planner returned invalid steps".
+  const prompt = `Given this goal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nReturn only JSON array of 3-5 ordered steps. Each object: title (under 10 words), detail (one sentence, under 20 words), estimated_minutes, lane (agency|art|creatorconnect|personal|codex|hermes|openclaw), depends_on (prior step index or null). Be terse.`;
+  const raw = await callDeepSeek(prompt, 900, env, remainingMs(startBudget()));
+  if (!raw) return json({ error: "Planner unavailable. The live planner could not be reached." }, 502);
   let steps;
-  try { steps = JSON.parse(payload?.choices?.[0]?.message?.content?.replace(/^```json\s*|^```|```$/gm, "").trim()); } catch { return json({ error: "Planner returned invalid steps." }, 502); }
-  if (!Array.isArray(steps) || !steps.length) return json({ error: "Planner returned no steps." }, 502);
+  try { steps = JSON.parse(raw); } catch { return json({ error: "The planner returned a response that could not be read. Try a shorter goal." }, 502); }
+  if (!Array.isArray(steps)) steps = Array.isArray(steps?.steps) ? steps.steps : null;
+  if (!Array.isArray(steps) || !steps.length) return json({ error: "The planner returned no steps." }, 502);
   const goalResponse = await supabase(request, env, "northstar_goals", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "return=representation" }, body: JSON.stringify({ title: goal }) });
   const goals = await goalResponse.json(); const goalId = goals?.[0]?.id;
   const today = new Date(); let hour = Math.max(9, today.getHours() + 1); let day = today.toISOString().slice(0, 10); const scheduled=[];
@@ -326,13 +339,7 @@ async function createRoadmap(request, env) {
 
   // Single pass: the 3-pass deep flow exceeded the Worker execution limit.
   const prompt = `Goal: ${goal}\n\nFull operating brief:\n${operatingBrief}\n\n${ROADMAP_INSTRUCTION}`;
-  let raw;
-  try {
-    raw = await callDeepSeek(prompt, 600, env, 18000);
-  } catch (error) {
-    if (error instanceof DeepSeekTimeout) return json({ error: "The roadmap agent took longer than 18 seconds. Try a shorter, more specific goal." }, 504);
-    throw error;
-  }
+  const raw = await callDeepSeek(prompt, 600, env, remainingMs(startBudget()));
   const entries = parseRoadmap(raw);
   if (!entries) return json({ error: "The live agent could not produce a roadmap." }, 502);
   const niches = normalizeRoadmap(entries);
@@ -374,21 +381,31 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
+      // Any agent route that outruns its budget answers 504 with readable text
+      // instead of leaving the browser on a dead socket.
+      const agentRoute = async (handler) => {
+        try {
+          return await handler(request, env);
+        } catch (error) {
+          if (error instanceof DeepSeekTimeout) return json({ error: "The agent did not respond in time. Try a shorter, more specific request." }, 504);
+          throw error;
+        }
+      };
       if (url.pathname === "/api/decision-assessments") {
         if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
         if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
-        return assess(request, env);
+        return agentRoute(assess);
       }
       if (url.pathname === "/api/analyze") {
         if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
         if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
-        return analyze(request, env);
+        return agentRoute(analyze);
       }
-      if (url.pathname === "/api/plan") { if (request.method !== "POST") return json({ error: "Method not allowed." }, 405); return createPlan(request, env); }
+      if (url.pathname === "/api/plan") { if (request.method !== "POST") return json({ error: "Method not allowed." }, 405); return agentRoute(createPlan); }
       if (url.pathname === "/api/roadmap") {
         if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
         if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
-        return createRoadmap(request, env);
+        return agentRoute(createRoadmap);
       }
       if (url.pathname.startsWith("/api/memory/")) return memory(request, env, url);
       return new Response(appHtml, {

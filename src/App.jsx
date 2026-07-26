@@ -190,6 +190,7 @@ export function App() {
   const [agentStates, setAgentStates] = useState([]);
   const [goal, setGoal] = useState("");
   const [planning, setPlanning] = useState(false);
+  const [planError, setPlanError] = useState("");
   const [view, setView] = useState("command");
   const [roadmapGoal, setRoadmapGoal] = useState("");
   const [roadmap, setRoadmap] = useState(null);
@@ -272,7 +273,15 @@ export function App() {
     event.preventDefault();
     if (!goal.trim()) return;
     setPlanning(true);
-    try { await memoryApi.plan(accessCode, goal.trim(), store.operatingDraft); setGoal(""); } finally { setPlanning(false); }
+    setPlanError("");
+    try {
+      await memoryApi.plan(accessCode, goal.trim(), store.operatingDraft);
+      setGoal("");
+    } catch (error) {
+      setPlanError(error instanceof Error ? error.message : "Planner unavailable.");
+    } finally {
+      setPlanning(false);
+    }
   };
   const buildRoadmap = async (event) => {
     event.preventDefault();
@@ -360,6 +369,7 @@ export function App() {
       <form className="activity-form" onSubmit={createPlan}>
         <label htmlFor="goal">What are you trying to achieve?</label>
         <div className="activity-row"><input id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="Describe one outcome to plan" /><button type="submit" disabled={planning}>{planning ? "Planning..." : "Build plan"}</button></div>
+        {planError && <p role="alert" style={{ color: "#b42318", margin: "10px 0 0", fontSize: 12 }}>{planError}</p>}
       </form>
 
       {activeLane && <section className="active-strip" style={{ "--active": activeLane.color }}><CircleDot size={16} /><span>In focus now</span><strong>{store.active.title}</strong><button onClick={clearActive}>End focus</button></section>}
