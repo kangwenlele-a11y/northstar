@@ -131,6 +131,18 @@ async function memory(request, env, url) {
     const result = await supabase(request, env, `northstar_roadmaps?owner_key=eq.${ownerKey}&select=*&order=created_at.desc&limit=10`);
     return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
   }
+  if (path.startsWith("roadmaps/") && request.method === "PUT") {
+    const id = path.split("/")[1];
+    if (!/^[0-9a-f-]{36}$/i.test(id || "")) return json({ error: "Invalid roadmap." }, 400);
+    const body = await request.json();
+    if (!Array.isArray(body.niches)) return json({ error: "Invalid roadmap actions." }, 400);
+    const result = await supabase(request, env, `northstar_roadmaps?id=eq.${id}&owner_key=eq.${ownerKey}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Prefer: "return=representation" },
+      body: JSON.stringify({ niches: body.niches }),
+    });
+    return new Response(await result.text(), { status: result.status, headers: { "Content-Type": "application/json" } });
+  }
   if (path === "active-focus") {
     if (request.method === "GET") {
       const result = await supabase(request, env, `northstar_active_focus?owner_key=eq.${ownerKey}&select=*`);

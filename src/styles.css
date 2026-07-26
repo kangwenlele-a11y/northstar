@@ -26,6 +26,12 @@ button { cursor: pointer; }
 .local-note { margin: auto 6px 0; padding-top: 15px; border-top: 1px solid #32423c; color: #7e8d85; font-size: 10px; line-height: 1.45; }
 
 .command-main { width: min(1210px, 100%); margin: 0 auto; padding: 0 40px 55px; }
+.cloud-state { position: fixed; z-index: 20; right: 18px; bottom: 16px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #d4ddd7; border-radius: 6px; padding: 7px 9px; background: #fff; box-shadow: 0 5px 20px #17221f14; color: #65716b; font-size: 10px; font-weight: 700; }
+.cloud-state i { width: 6px; height: 6px; border-radius: 50%; background: #9aa49f; }
+.cloud-state.synced i { background: #20a38c; }
+.cloud-state.syncing i, .cloud-state.connecting i { background: #d89a42; }
+.cloud-state.error { border-color: #e2b8b3; color: #a33b31; }
+.cloud-state.error i { background: #c54c40; }
 .command-header { min-height: 146px; display: flex; align-items: center; justify-content: space-between; gap: 26px; border-bottom: 1px solid #dce2dd; }
 .eyebrow { margin: 0; color: #168a77; font: 600 10px "DM Mono", monospace; letter-spacing: .08em; }
 .command-header h1 { margin: 7px 0 6px; font: 700 30px/1.12 Manrope, sans-serif; letter-spacing: 0; }.subhead { margin: 0; color: #67736d; font-size: 13px; }

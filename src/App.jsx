@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   ArrowRight,
@@ -26,7 +26,6 @@ import {
 import { hasLiveAgentBridge, requestLiveAssessment } from "./agentClient";
 import { memoryApi } from "./memoryClient";
 
-const STORAGE_KEY = "personal-command-center:v1";
 const AGENT_LANES = ["codex", "hermes", "openclaw"];
 const HOURS = Array.from({ length: 17 }, (_, index) => index + 6);
 const LANES = [
@@ -83,15 +82,6 @@ const formatHour = (hour) => `${hour % 12 || 12}:00 ${hour < 12 ? "AM" : "PM"}`;
 const formatDate = (key) => parseDateKey(key).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 const emptyDay = () => ({ goal: "", goalId: null, blocks: {}, energy: "steady" });
 
-function readStore() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return stored && typeof stored === "object" ? { ...DEFAULT_STATE, ...stored } : DEFAULT_STATE;
-  } catch {
-    return DEFAULT_STATE;
-  }
-}
-
 function scoreActivity(value) {
   const input = value.toLowerCase();
   const match = (words) => words.some((word) => input.includes(word));
@@ -125,13 +115,7 @@ function scoreActivity(value) {
 }
 
 function useCommandStore() {
-  const [store, setStore] = useState(readStore);
-  const timer = useRef(null);
-  useEffect(() => {
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(store)), 150);
-    return () => clearTimeout(timer.current);
-  }, [store]);
+  const [store, setStore] = useState(DEFAULT_STATE);
   return { store, setStore };
 }
 
@@ -200,7 +184,7 @@ function DailyStep({ index, block, isNext, onToggle, onBlock, onStart }) {
 }
 
 export function App() {
-  const [accessCode, setAccessCode] = useState(() => sessionStorage.getItem("northstar-access-code") || "");
+  const accessCode = "";
   const [date, setDate] = useState(localDateKey());
   const [activity, setActivity] = useState("");
   const [analysis, setAnalysis] = useState(null);
@@ -220,17 +204,33 @@ export function App() {
   const [roadmap, setRoadmap] = useState(null);
   const [roadmapBuilding, setRoadmapBuilding] = useState(false);
   const [roadmapError, setRoadmapError] = useState("");
-  const [checkedActions, setCheckedActions] = useState({});
+  const [cloudStatus, setCloudStatus] = useState("connecting");
   const { store, setStore } = useCommandStore();
   useEffect(() => {
     Promise.all([memoryApi.profile(accessCode), memoryApi.decisions(accessCode), memoryApi.active(accessCode)]).then(([profiles, decisions, active]) => {
       const profile = profiles?.[0];
       const mapped = (decisions || []).map((item) => ({ ...item, longTerm: item.long_term_score, shortTerm: item.short_term_score, nextAction: item.next_action, at: item.created_at }));
-      const savedActive = active?.[0] ? { ...active[0], title: active[0].task, startedAt: active[0].started_at } : current.active;
+      const savedActive = active?.[0] ? { ...active[0], title: active[0].task, startedAt: active[0].started_at } : null;
       setStore((current) => ({ ...current, mission: profile?.mission || current.mission, operatingDraft: profile?.operating_brief?.text || current.operatingDraft, decisions: mapped.length ? mapped : current.decisions, active: savedActive }));
-    }).catch(() => setAccessCode(""));
+      setCloudStatus("synced");
+    }).catch(() => setCloudStatus("error"));
   }, [accessCode]);
-  useEffect(() => { memoryApi.saveProfile(accessCode, { mission: store.mission, operating_brief: { text: store.operatingDraft } }).catch(() => {}); }, [accessCode, store.mission, store.operatingDraft]);
+  const cloudWrite = (request) => {
+    setCloudStatus("syncing");
+    return request.then((result) => {
+      setCloudStatus("synced");
+      return result;
+    }).catch((error) => {
+      setCloudStatus("error");
+      throw error;
+    });
+  };
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      cloudWrite(memoryApi.saveProfile(accessCode, { mission: store.mission, operating_brief: { text: store.operatingDraft } })).catch(() => {});
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [accessCode, store.mission, store.operatingDraft]);
   useEffect(() => { memoryApi.agentState(accessCode).then(setAgentStates).catch(() => {}); }, [accessCode]);
   useEffect(() => {
     memoryApi.daily(accessCode, date).then((rows) => {
@@ -273,7 +273,7 @@ export function App() {
   useEffect(() => {
     memoryApi.roadmaps(accessCode).then((rows) => {
       const latest = Array.isArray(rows) ? rows[0] : null;
-      if (latest) setRoadmap({ goal: latest.goal, niches: Array.isArray(latest.niches) ? latest.niches : [] });
+      if (latest) setRoadmap({ id: latest.id, goal: latest.goal, niches: Array.isArray(latest.niches) ? latest.niches : [] });
     }).catch(() => {});
   }, [accessCode]);
   const day = store.days[date] || emptyDay();
@@ -316,18 +316,21 @@ export function App() {
     setAnalysis(entry);
     setShowReasoning(false);
     setStore((current) => ({ ...current, decisions: [entry, ...current.decisions].slice(0, 30) }));
-    if (accessCode) memoryApi.saveDecision(accessCode, entry).catch(() => {});
+    cloudWrite(memoryApi.saveDecision(accessCode, entry)).catch(() => {});
   };
   const startFocus = () => {
     if (!analysis) return;
     const next = { title: analysis.activity, task: analysis.activity, lane: analysis.lane, startedAt: new Date().toISOString() };
     setStore((current) => ({ ...current, active: next }));
-    if (accessCode) memoryApi.saveActive(accessCode, { task: next.task, lane: next.lane, started_at: next.startedAt }).catch(() => {});
+    cloudWrite(memoryApi.saveActive(accessCode, { task: next.task, lane: next.lane, started_at: next.startedAt })).catch(() => {});
   };
-  const clearActive = () => { setStore((current) => ({ ...current, active: null })); if (accessCode) memoryApi.saveActive(accessCode, {}).catch(() => {}); };
+  const clearActive = () => {
+    setStore((current) => ({ ...current, active: null }));
+    cloudWrite(memoryApi.saveActive(accessCode, {})).catch(() => {});
+  };
   const saveBlock = (hour, block) => {
     updateDay({ ...day, blocks: { ...day.blocks, [hour]: block } });
-    memoryApi.saveDaily(accessCode, { date, hour, task: block.task, lane: block.laneId, done: block.done, blocked_reason: block.blockedReason || null, goal_id: block.goalId || day.goalId || null }).catch(() => {});
+    cloudWrite(memoryApi.saveDaily(accessCode, { date, hour, task: block.task, lane: block.laneId, done: block.done, blocked_reason: block.blockedReason || null, goal_id: block.goalId || day.goalId || null })).catch(() => {});
     setEditingHour(null);
   };
   const copyYesterday = () => {
@@ -378,8 +381,7 @@ export function App() {
     setRoadmapError("");
     try {
       const result = await memoryApi.buildRoadmap(accessCode, roadmapGoal.trim());
-      setRoadmap({ goal: result.goal, niches: Array.isArray(result.niches) ? result.niches : [] });
-      setCheckedActions({});
+      setRoadmap({ id: result.id, goal: result.goal, niches: Array.isArray(result.niches) ? result.niches : [] });
       setRoadmapGoal("");
       memoryApi.agentState(accessCode).then(setAgentStates).catch(() => {});
     } catch (error) {
@@ -388,13 +390,28 @@ export function App() {
       setRoadmapBuilding(false);
     }
   };
-  const toggleAction = (key) => setCheckedActions((current) => ({ ...current, [key]: !current[key] }));
+  const toggleAction = (nicheIndex, actionIndex) => {
+    if (!roadmap?.id) return;
+    const niches = roadmap.niches.map((entry, entryIndex) => {
+      if (entryIndex !== nicheIndex) return entry;
+      return {
+        ...entry,
+        actions: (entry.actions || []).map((action, index) => {
+          if (index !== actionIndex) return action;
+          const step = typeof action === "string" ? action : action?.step;
+          return { step, done: !(typeof action === "object" && action?.done) };
+        }),
+      };
+    });
+    setRoadmap((current) => ({ ...current, niches }));
+    cloudWrite(memoryApi.saveRoadmap(accessCode, roadmap.id, niches)).catch(() => {});
+  };
   const orderedSteps = Object.entries(day.blocks || {}).sort(([first], [second]) => Number(first) - Number(second));
   const nextStepIndex = orderedSteps.findIndex(([, block]) => !block.done && !block.blockedReason);
   const startDailyStep = (block) => {
     const next = { title: block.task, task: block.task, lane: block.laneId, startedAt: new Date().toISOString() };
     setStore((current) => ({ ...current, active: next }));
-    memoryApi.saveActive(accessCode, { task: next.task, lane: next.lane, started_at: next.startedAt }).catch(() => {});
+    cloudWrite(memoryApi.saveActive(accessCode, { task: next.task, lane: next.lane, started_at: next.startedAt })).catch(() => {});
   };
 
   return <main className="command-app">
@@ -422,6 +439,7 @@ export function App() {
     </aside>
 
     <section className="command-main">
+      <div className={`cloud-state ${cloudStatus}`}><i />{cloudStatus === "synced" ? "Cloud synced" : cloudStatus === "syncing" ? "Saving to cloud..." : cloudStatus === "error" ? "Cloud save failed" : "Connecting to cloud..."}</div>
       {view === "roadmap" ? <>
       <header className="command-header">
         <div><p className="eyebrow">SEQUENCED PLAN</p><h1>Know which niche comes first.</h1><p className="subhead">Give the agents one goal. They sequence the relevant niches, then hand any agent-lane steps to Codex, Hermes and OpenClaw.</p></div>
@@ -441,7 +459,8 @@ export function App() {
               {(entry.actions || []).map((action, actionIndex) => {
                 const key = `${index}:${actionIndex}`;
                 const step = typeof action === "string" ? action : action?.step;
-                return <li key={key}><button type="button" className={`roadmap-check${checkedActions[key] ? " done" : ""}`} onClick={() => toggleAction(key)} aria-pressed={Boolean(checkedActions[key])}><span className="roadmap-box">{checkedActions[key] ? <Check size={12} /> : null}</span><span>{step}</span></button></li>;
+                const done = typeof action === "object" && Boolean(action?.done);
+                return <li key={key}><button type="button" className={`roadmap-check${done ? " done" : ""}`} onClick={() => toggleAction(index, actionIndex)} aria-pressed={done}><span className="roadmap-box">{done ? <Check size={12} /> : null}</span><span>{step}</span></button></li>;
               })}
             </ul>
             {entry.reasoning && <p className="roadmap-reasoning">{entry.reasoning}</p>}
