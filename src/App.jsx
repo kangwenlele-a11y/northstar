@@ -20,6 +20,7 @@ import {
   RotateCcw,
   Sparkles,
   Target,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { hasLiveAgentBridge, requestLiveAssessment } from "./agentClient";
@@ -80,7 +81,7 @@ const shiftDate = (key, amount) => {
 };
 const formatHour = (hour) => `${hour % 12 || 12}:00 ${hour < 12 ? "AM" : "PM"}`;
 const formatDate = (key) => parseDateKey(key).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-const emptyDay = () => ({ goal: "", blocks: {}, energy: "steady" });
+const emptyDay = () => ({ goal: "", goalId: null, blocks: {}, energy: "steady" });
 
 function readStore() {
   try {
@@ -175,6 +176,29 @@ function ScheduleRow({ hour, block, editing, onEdit, onSave, onCancel, onToggle 
   </div>;
 }
 
+function DailyStep({ index, block, isNext, onToggle, onBlock, onStart }) {
+  const [showBlocker, setShowBlocker] = useState(false);
+  const [reason, setReason] = useState(block.blockedReason || "");
+  const lane = LANES.find((item) => item.id === block.laneId) || LANES[0];
+  return <article className={`daily-step${block.done ? " done" : ""}${block.blockedReason ? " blocked" : ""}${isNext ? " next" : ""}`} style={{ "--step-lane": lane.color }}>
+    <button className="step-check" onClick={onToggle} aria-label={block.done ? "Mark step incomplete" : "Complete step"}>{block.done && <Check size={13} />}</button>
+    <div className="step-copy">
+      <div className="step-meta"><span>STEP {index + 1}</span><small>{lane.label}</small>{isNext && <strong>NEXT</strong>}</div>
+      <p>{block.task}</p>
+      {block.blockedReason && <div className="blocker-note"><TriangleAlert size={13} /><span>{block.blockedReason}</span></div>}
+      {showBlocker && <form className="blocker-form" onSubmit={(event) => { event.preventDefault(); onBlock(reason.trim()); setShowBlocker(false); }}>
+        <input autoFocus value={reason} onChange={(event) => setReason(event.target.value)} placeholder="What is stopping this step?" />
+        <button type="submit">Pin blocker</button>
+        <button type="button" onClick={() => setShowBlocker(false)} aria-label="Cancel blocker"><X size={14} /></button>
+      </form>}
+    </div>
+    {!block.done && <div className="step-actions">
+      {isNext && <button className="step-start" onClick={onStart}><Play size={13} /> Focus</button>}
+      <button className="step-block" onClick={() => setShowBlocker((value) => !value)}>{block.blockedReason ? "Edit blocker" : "Blocked?"}</button>
+    </div>}
+  </article>;
+}
+
 export function App() {
   const [accessCode, setAccessCode] = useState(() => sessionStorage.getItem("northstar-access-code") || "");
   const [date, setDate] = useState(localDateKey());
@@ -208,6 +232,44 @@ export function App() {
   }, [accessCode]);
   useEffect(() => { memoryApi.saveProfile(accessCode, { mission: store.mission, operating_brief: { text: store.operatingDraft } }).catch(() => {}); }, [accessCode, store.mission, store.operatingDraft]);
   useEffect(() => { memoryApi.agentState(accessCode).then(setAgentStates).catch(() => {}); }, [accessCode]);
+  useEffect(() => {
+    memoryApi.daily(accessCode, date).then((rows) => {
+      if (!Array.isArray(rows)) return;
+      const remoteBlocks = Object.fromEntries(rows.map((row) => {
+        let task = row.task;
+        let blockedReason = "";
+        try {
+          const saved = JSON.parse(row.task);
+          if (saved?.version === 1 && typeof saved.task === "string") {
+            task = saved.task;
+            blockedReason = typeof saved.blockedReason === "string" ? saved.blockedReason : "";
+          }
+        } catch {
+          // Existing plain-text tasks remain valid.
+        }
+        return [row.hour, {
+          task,
+          laneId: row.lane === "creatorconnect" ? "creator" : LANES.some((lane) => lane.id === row.lane) ? row.lane : "personal",
+          done: Boolean(row.done),
+          blockedReason,
+          goalId: row.goal_id || null,
+        }];
+      }));
+      const remoteGoal = rows.find((row) => row.northstar_goals?.title)?.northstar_goals?.title || "";
+      setStore((current) => ({
+        ...current,
+        days: {
+          ...current.days,
+          [date]: {
+            ...(current.days[date] || emptyDay()),
+            goal: remoteGoal || current.days[date]?.goal || "",
+            goalId: rows[0]?.goal_id || current.days[date]?.goalId || null,
+            blocks: remoteBlocks,
+          },
+        },
+      }));
+    }).catch(() => {});
+  }, [accessCode, date, setStore]);
   useEffect(() => {
     memoryApi.roadmaps(accessCode).then((rows) => {
       const latest = Array.isArray(rows) ? rows[0] : null;
@@ -263,7 +325,11 @@ export function App() {
     if (accessCode) memoryApi.saveActive(accessCode, { task: next.task, lane: next.lane, started_at: next.startedAt }).catch(() => {});
   };
   const clearActive = () => { setStore((current) => ({ ...current, active: null })); if (accessCode) memoryApi.saveActive(accessCode, {}).catch(() => {}); };
-  const saveBlock = (hour, block) => { updateDay({ ...day, blocks: { ...day.blocks, [hour]: block } }); if (accessCode) memoryApi.saveDaily(accessCode, { date, hour, task: block.task, lane: block.laneId, done: block.done }).catch(() => {}); setEditingHour(null); };
+  const saveBlock = (hour, block) => {
+    updateDay({ ...day, blocks: { ...day.blocks, [hour]: block } });
+    memoryApi.saveDaily(accessCode, { date, hour, task: block.task, lane: block.laneId, done: block.done, blocked_reason: block.blockedReason || null, goal_id: block.goalId || day.goalId || null }).catch(() => {});
+    setEditingHour(null);
+  };
   const copyYesterday = () => {
     const prior = store.days[shiftDate(date, -1)];
     if (!prior) return;
@@ -275,7 +341,29 @@ export function App() {
     setPlanning(true);
     setPlanError("");
     try {
-      await memoryApi.plan(accessCode, goal.trim(), store.operatingDraft);
+      const result = await memoryApi.plan(accessCode, goal.trim(), store.operatingDraft);
+      const generated = Array.isArray(result?.steps) ? result.steps : [];
+      const planDate = generated[0]?.date || date;
+      const planBlocks = Object.fromEntries(generated.filter((step) => step.date === planDate).map((step) => [step.hour, {
+        task: `${step.title}: ${step.detail}`,
+        laneId: step.lane === "creatorconnect" ? "creator" : LANES.some((lane) => lane.id === step.lane) ? step.lane : "personal",
+        done: false,
+        blockedReason: "",
+        goalId: result.goal_id,
+      }]));
+      setDate(planDate);
+      setStore((current) => ({
+        ...current,
+        days: {
+          ...current.days,
+          [planDate]: {
+            ...(current.days[planDate] || emptyDay()),
+            goal: goal.trim(),
+            goalId: result.goal_id,
+            blocks: planBlocks,
+          },
+        },
+      }));
       setGoal("");
     } catch (error) {
       setPlanError(error instanceof Error ? error.message : "Planner unavailable.");
@@ -301,6 +389,13 @@ export function App() {
     }
   };
   const toggleAction = (key) => setCheckedActions((current) => ({ ...current, [key]: !current[key] }));
+  const orderedSteps = Object.entries(day.blocks || {}).sort(([first], [second]) => Number(first) - Number(second));
+  const nextStepIndex = orderedSteps.findIndex(([, block]) => !block.done && !block.blockedReason);
+  const startDailyStep = (block) => {
+    const next = { title: block.task, task: block.task, lane: block.laneId, startedAt: new Date().toISOString() };
+    setStore((current) => ({ ...current, active: next }));
+    memoryApi.saveActive(accessCode, { task: next.task, lane: next.lane, started_at: next.startedAt }).catch(() => {});
+  };
 
   return <main className="command-app">
     <aside className="command-sidebar">
@@ -367,12 +462,31 @@ export function App() {
         {showOperatingDraft && <div className="draft-body"><div className="strategy-lens"><span>Priority lens</span><strong>AI automation → cash-flow learning → English / software → self-improvement</strong><small>AI-assisted investing stays low priority until your controlled businesses are stronger.</small></div><textarea value={store.operatingDraft} onChange={(event) => setStore((current) => ({ ...current, operatingDraft: event.target.value }))} aria-label="Operating brief draft" /></div>}
       </section>
       <form className="activity-form" onSubmit={createPlan}>
-        <label htmlFor="goal">What are you trying to achieve?</label>
-        <div className="activity-row"><input id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="Describe one outcome to plan" /><button type="submit" disabled={planning}>{planning ? "Planning..." : "Build plan"}</button></div>
+        <label htmlFor="goal">What must be true by the end of today?</label>
+        <div className="activity-row"><input id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="Example: improve the Shopify homepage until the banner is clear" /><button type="submit" disabled={planning}>{planning ? "Breaking it down..." : "Pin today's goal"}</button></div>
         {planError && <p role="alert" style={{ color: "#b42318", margin: "10px 0 0", fontSize: 12 }}>{planError}</p>}
       </form>
 
       {activeLane && <section className="active-strip" style={{ "--active": activeLane.color }}><CircleDot size={16} /><span>In focus now</span><strong>{store.active.title}</strong><button onClick={clearActive}>End focus</button></section>}
+
+      {day.goal && <section className="today-board">
+        <div className="board-head">
+          <div><span className="eyebrow">TODAY'S WORKFLOW</span><h2>{day.goal}</h2><p>{completed} of {orderedSteps.length} steps complete</p></div>
+          <div className="board-progress" aria-label={`${completed} of ${orderedSteps.length} complete`}><i style={{ width: `${orderedSteps.length ? completed / orderedSteps.length * 100 : 0}%` }} /></div>
+        </div>
+        <div className="daily-steps">
+          {orderedSteps.map(([hour, block], index) => <DailyStep
+            key={hour}
+            index={index}
+            block={block}
+            isNext={index === nextStepIndex}
+            onToggle={() => saveBlock(hour, { ...block, done: !block.done, blockedReason: block.done ? block.blockedReason : "" })}
+            onBlock={(blockedReason) => saveBlock(hour, { ...block, blockedReason })}
+            onStart={() => startDailyStep(block)}
+          />)}
+        </div>
+        {!orderedSteps.length && <p className="board-empty">The goal is pinned. Add a step below or rebuild the plan.</p>}
+      </section>}
 
       <section className="capture-panel">
         <div className="capture-heading"><div><span className="pulse-dot" />LIVE INPUT</div><small>Update this whenever your attention changes.</small></div>
@@ -389,8 +503,7 @@ export function App() {
       </section> : <section className="empty-analysis"><Sparkles size={22} /><div><strong>Your agents are standing by.</strong><p>Describe the activity in plain language. They will weigh immediate payoff, long-term leverage, and the cost to your attention.</p></div></section>}
 
       <section className="focus-section">
-        <div className="section-header"><div><span className="eyebrow">TURN DECISIONS INTO TIME</span><h2>Protected focus</h2><p>{completed} of {blocks.length} blocks complete today.</p></div><button className="quiet-button" onClick={copyYesterday}><RotateCcw size={15} /> Copy yesterday</button></div>
-        <div className="goal-row"><Target size={17} /><input value={day.goal} onChange={(event) => updateDay({ ...day, goal: event.target.value })} placeholder="What one result makes today count?" aria-label="Daily result" /></div>
+        <div className="section-header"><div><span className="eyebrow">OPTIONAL TIME BLOCKS</span><h2>Place the work on the clock</h2><p>The board above tracks sequence. Use time blocks only when they help.</p></div><button className="quiet-button" onClick={copyYesterday}><RotateCcw size={15} /> Copy yesterday</button></div>
         <div className="schedule">
           {HOURS.map((hour) => <ScheduleRow key={hour} hour={hour} block={day.blocks?.[hour]} editing={editingHour === hour} onEdit={() => setEditingHour(hour)} onSave={(block) => saveBlock(hour, block)} onCancel={() => setEditingHour(null)} onToggle={() => saveBlock(hour, { ...day.blocks[hour], done: !day.blocks[hour].done })} />)}
         </div>

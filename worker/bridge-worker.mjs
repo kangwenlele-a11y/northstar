@@ -115,12 +115,15 @@ async function memory(request, env, url) {
     if (request.method === "GET") {
       const date = url.searchParams.get("date");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return json({ error: "Invalid date." }, 400);
-      const result = await supabase(request, env, `northstar_daily_blocks?owner_key=eq.${ownerKey}&date=eq.${date}&select=*&order=hour.asc`);
+      const result = await supabase(request, env, `northstar_daily_blocks?owner_key=eq.${ownerKey}&date=eq.${date}&select=*,northstar_goals(title)&order=hour.asc`);
       return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
     }
     if (request.method === "PUT") {
       const body = await request.json();
-      const result = await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ owner_key: ownerKey, date: body.date, hour: body.hour, task: body.task, lane: body.lane, done: body.done, updated_at: new Date().toISOString() }) });
+      const task = body.blocked_reason
+        ? JSON.stringify({ version: 1, task: body.task, blockedReason: body.blocked_reason })
+        : body.task;
+      const result = await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ owner_key: ownerKey, date: body.date, hour: body.hour, task, lane: body.lane, done: body.done, goal_id: body.goal_id || null, updated_at: new Date().toISOString() }) });
       return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
     }
   }
