@@ -14,6 +14,7 @@ import {
   Gauge,
   ListTodo,
   LockKeyhole,
+  Milestone,
   Play,
   Plus,
   RotateCcw,
@@ -25,6 +26,7 @@ import { hasLiveAgentBridge, requestLiveAssessment } from "./agentClient";
 import { memoryApi } from "./memoryClient";
 
 const STORAGE_KEY = "personal-command-center:v1";
+const AGENT_LANES = ["codex", "hermes", "openclaw"];
 const HOURS = Array.from({ length: 17 }, (_, index) => index + 6);
 const LANES = [
   { id: "automation", label: "AI automation", color: "#00a58b", tint: "#def7f0" },
@@ -188,6 +190,12 @@ export function App() {
   const [agentStates, setAgentStates] = useState([]);
   const [goal, setGoal] = useState("");
   const [planning, setPlanning] = useState(false);
+  const [view, setView] = useState("command");
+  const [roadmapGoal, setRoadmapGoal] = useState("");
+  const [roadmap, setRoadmap] = useState(null);
+  const [roadmapBuilding, setRoadmapBuilding] = useState(false);
+  const [roadmapError, setRoadmapError] = useState("");
+  const [checkedActions, setCheckedActions] = useState({});
   const { store, setStore } = useCommandStore();
   useEffect(() => {
     Promise.all([memoryApi.profile(accessCode), memoryApi.decisions(accessCode), memoryApi.active(accessCode)]).then(([profiles, decisions, active]) => {
@@ -199,6 +207,12 @@ export function App() {
   }, [accessCode]);
   useEffect(() => { memoryApi.saveProfile(accessCode, { mission: store.mission, operating_brief: { text: store.operatingDraft } }).catch(() => {}); }, [accessCode, store.mission, store.operatingDraft]);
   useEffect(() => { memoryApi.agentState(accessCode).then(setAgentStates).catch(() => {}); }, [accessCode]);
+  useEffect(() => {
+    memoryApi.roadmaps(accessCode).then((rows) => {
+      const latest = Array.isArray(rows) ? rows[0] : null;
+      if (latest) setRoadmap({ goal: latest.goal, niches: Array.isArray(latest.niches) ? latest.niches : [] });
+    }).catch(() => {});
+  }, [accessCode]);
   const day = store.days[date] || emptyDay();
   const blocks = Object.entries(day.blocks || {});
   const completed = blocks.filter(([, block]) => block.done).length;
@@ -260,14 +274,33 @@ export function App() {
     setPlanning(true);
     try { await memoryApi.plan(accessCode, goal.trim(), store.operatingDraft); setGoal(""); } finally { setPlanning(false); }
   };
+  const buildRoadmap = async (event) => {
+    event.preventDefault();
+    if (!roadmapGoal.trim() || roadmapBuilding) return;
+    setRoadmapBuilding(true);
+    setRoadmapError("");
+    try {
+      const result = await memoryApi.buildRoadmap(accessCode, roadmapGoal.trim());
+      setRoadmap({ goal: result.goal, niches: Array.isArray(result.niches) ? result.niches : [] });
+      setCheckedActions({});
+      setRoadmapGoal("");
+      memoryApi.agentState(accessCode).then(setAgentStates).catch(() => {});
+    } catch (error) {
+      setRoadmapError(error instanceof Error ? error.message : "Roadmap unavailable.");
+    } finally {
+      setRoadmapBuilding(false);
+    }
+  };
+  const toggleAction = (key) => setCheckedActions((current) => ({ ...current, [key]: !current[key] }));
 
   return <main className="command-app">
     <aside className="command-sidebar">
       <div className="brand"><span><Flame size={19} /></span><strong>Northstar</strong></div>
       <div className="sidebar-label">YOUR OPERATING SYSTEM</div>
-      <button className="side-nav active"><Gauge size={17} /> Command center</button>
-      <button className="side-nav"><ListTodo size={17} /> Daily focus</button>
-      <button className="side-nav"><Clock3 size={17} /> Decision history</button>
+      <button className={`side-nav${view === "command" ? " active" : ""}`} onClick={() => setView("command")}><Gauge size={17} /> Command center</button>
+      <button className={`side-nav${view === "roadmap" ? " active" : ""}`} onClick={() => setView("roadmap")}><Milestone size={17} /> Roadmap</button>
+      <button className="side-nav" onClick={() => setView("command")}><ListTodo size={17} /> Daily focus</button>
+      <button className="side-nav" onClick={() => setView("command")}><Clock3 size={17} /> Decision history</button>
       <section className="mission-card">
         <div><Sparkles size={16} /><span>North star</span></div>
         <p>{store.mission}</p>
@@ -285,6 +318,33 @@ export function App() {
     </aside>
 
     <section className="command-main">
+      {view === "roadmap" ? <>
+      <header className="command-header">
+        <div><p className="eyebrow">SEQUENCED PLAN</p><h1>Know which niche comes first.</h1><p className="subhead">Give the agents one goal. They sequence the relevant niches, then hand any agent-lane steps to Codex, Hermes and OpenClaw.</p></div>
+      </header>
+      <form className="activity-form" onSubmit={buildRoadmap}>
+        <label htmlFor="roadmap-goal">What outcome should the roadmap reach?</label>
+        <div className="activity-row"><input id="roadmap-goal" value={roadmapGoal} onChange={(event) => setRoadmapGoal(event.target.value)} placeholder="Describe the goal to sequence" /><button type="submit" disabled={roadmapBuilding}>{roadmapBuilding ? "Sequencing..." : "Build roadmap"}</button></div>
+      </form>
+      {roadmapError && <p role="alert" style={{ color: "#b42318", margin: "12px 0 0" }}>{roadmapError}</p>}
+      {roadmapBuilding && <p className="roadmap-progress"><Sparkles size={15} /> Draft, then critique, then synthesis. Deep mode takes a moment.</p>}
+      {roadmap?.niches?.length ? <section className="roadmap-section">
+        <div className="section-header"><div><span className="eyebrow">CURRENT ROADMAP</span><h2>{roadmap.goal}</h2><p>{roadmap.niches.length} niches sequenced.</p></div></div>
+        <div className="roadmap-list">
+          {roadmap.niches.map((entry, index) => <article key={`${entry.niche}-${index}`} className="roadmap-card">
+            <div className="roadmap-head"><span className="roadmap-number">{entry.sequence_position ?? index + 1}</span><div><h3>{entry.niche}</h3>{AGENT_LANES.some((agent) => String(entry.niche).toLowerCase().includes(agent)) && <span className="roadmap-agent">Agent lane</span>}</div></div>
+            <ul className="roadmap-actions">
+              {(entry.actions || []).map((action, actionIndex) => {
+                const key = `${index}:${actionIndex}`;
+                const step = typeof action === "string" ? action : action?.step;
+                return <li key={key}><button type="button" className={`roadmap-check${checkedActions[key] ? " done" : ""}`} onClick={() => toggleAction(key)} aria-pressed={Boolean(checkedActions[key])}><span className="roadmap-box">{checkedActions[key] ? <Check size={12} /> : null}</span><span>{step}</span></button></li>;
+              })}
+            </ul>
+            {entry.reasoning && <p className="roadmap-reasoning">{entry.reasoning}</p>}
+          </article>)}
+        </div>
+      </section> : !roadmapBuilding && <section className="empty-analysis"><Milestone size={22} /><div><strong>No roadmap yet.</strong><p>Describe one goal above. The agents sequence only the niches that actually serve it, and explain why each one sits where it does.</p></div></section>}
+      </> : <>
       <header className="command-header">
         <div><p className="eyebrow">PERSONAL COMMAND CENTER</p><h1>Choose the work that compounds.</h1><p className="subhead">Tell the agents what you are about to do. Get a clear decision before your time disappears.</p></div>
         <div className="date-controls"><button className="square-button" onClick={() => setDate(shiftDate(date, -1))} aria-label="Previous day"><ChevronLeft size={18} /></button><div><strong>{date === localDateKey() ? "Today" : formatDate(date)}</strong><small>{formatDate(date)}</small></div><button className="square-button" onClick={() => setDate(shiftDate(date, 1))} aria-label="Next day"><ChevronRight size={18} /></button></div>
@@ -326,6 +386,7 @@ export function App() {
         </div>
       </section>
       <section className="history-section"><div className="section-header"><div><span className="eyebrow">LEARNING LOOP</span><h2>Recent decisions</h2></div><span>{store.decisions.length} decisions captured</span></div>{recentDecisions.length ? <div className="history-grid">{recentDecisions.map((decision) => <article key={decision.id}><span className={`history-verdict ${decision.verdict.toLowerCase().replace(" ", "-")}`}>{decision.verdict}</span><strong>{decision.activity}</strong><p>{decision.longTerm}/10 long-term · {decision.shortTerm}/10 short-term</p></article>)}</div> : <p className="empty-history">Your decision history will become your evidence: what compounds, what pays, and what quietly drains you.</p>}</section>
+      </>}
     </section>
   </main>;
 }

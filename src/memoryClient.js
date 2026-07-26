@@ -21,4 +21,6 @@ export const memoryApi = {
   agentState: (code) => request(code, "/state"),
   saveAgentState: (code, agent, data) => request(code, `/state/${encodeURIComponent(agent)}`, { method: "PUT", body: JSON.stringify(data) }),
   plan: (code, goal, operatingBrief) => request(code, "/../plan", { method: "POST", body: JSON.stringify({ goal, operatingBrief }) }),
+  roadmaps: (code) => request(code, "/roadmaps"),
+  buildRoadmap: (code, goal) => request(code, "/../roadmap", { method: "POST", body: JSON.stringify({ goal }) }),
 };

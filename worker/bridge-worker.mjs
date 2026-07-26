@@ -1,6 +1,7 @@
 const model = "deepseek-ai/DeepSeek-V4-Flash";
 const lanes = new Set(["automation", "agency", "art", "creator", "personal"]);
 const verdicts = new Set(["Do now", "Schedule", "Protect", "Park it"]);
+const agentLanes = ["codex", "hermes", "openclaw"];
 const ownerKey = "richard";
 /* __NORTHSTAR_APP_HTML__ */
 
@@ -109,6 +110,10 @@ async function memory(request, env, url) {
       const result = await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ owner_key: ownerKey, date: body.date, hour: body.hour, task: body.task, lane: body.lane, done: body.done, updated_at: new Date().toISOString() }) });
       return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
     }
+  }
+  if (path === "roadmaps" && request.method === "GET") {
+    const result = await supabase(request, env, `northstar_roadmaps?owner_key=eq.${ownerKey}&select=*&order=created_at.desc&limit=10`);
+    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
   }
   if (path === "active-focus") {
     if (request.method === "GET") {
@@ -254,6 +259,118 @@ async function createPlan(request, env) {
   return json({ goal_id:goalId, steps:scheduled });
 }
 
+const ROADMAP_INSTRUCTION = `Given this goal and the full operating brief, produce a sequenced roadmap across the relevant niches. For each niche, in recommended order, return: niche, sequence_position, actions (2-4 concrete steps), reasoning (2-3 sentences on why this niche belongs at this position). Only include relevant niches. Respond ONLY as JSON array.`;
+
+// The endpoint takes only { goal }, so the brief is read from the stored profile.
+async function loadOperatingBrief(request, env) {
+  const result = await supabase(request, env, `northstar_profiles?owner_key=eq.${ownerKey}&select=operating_brief&order=updated_at.desc&limit=1`);
+  if (!result.ok) return "";
+  try {
+    const brief = (await result.json())?.[0]?.operating_brief;
+    if (typeof brief === "string") return brief;
+    if (brief && typeof brief.text === "string") return brief.text;
+  } catch {}
+  return "";
+}
+
+function parseRoadmap(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.roadmap) ? parsed.roadmap : Array.isArray(parsed?.niches) ? parsed.niches : null;
+    return entries && entries.length ? entries : null;
+  } catch {}
+  return null;
+}
+
+function normalizeRoadmap(entries) {
+  return entries
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry, index) => ({
+      niche: String(entry.niche ?? "").trim().slice(0, 120),
+      sequence_position: Number.isFinite(Number(entry.sequence_position)) ? Number(entry.sequence_position) : index + 1,
+      actions: (Array.isArray(entry.actions) ? entry.actions : [])
+        .map((action) => typeof action === "string"
+          ? { step: action.trim(), lane: null }
+          : { step: String(action?.step ?? action?.title ?? action?.action ?? "").trim(), lane: typeof action?.lane === "string" ? action.lane.toLowerCase() : null })
+        .filter((action) => action.step)
+        .slice(0, 4),
+      reasoning: typeof entry.reasoning === "string" ? entry.reasoning.trim().slice(0, 800) : "",
+    }))
+    .filter((entry) => entry.niche && entry.actions.length)
+    .sort((a, b) => a.sequence_position - b.sequence_position)
+    .map((entry, index) => ({ ...entry, sequence_position: index + 1 }));
+}
+
+const detectAgent = (value) => agentLanes.find((agent) => new RegExp(`\\b${agent}\\b`).test(String(value || "").toLowerCase())) || null;
+
+async function createRoadmap(request, env) {
+  if (!env.SILICONFLOW_API_KEY) return json({ error: "The live agent has not been configured." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "Invalid request." }, 400); }
+  const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+  if (goal.length < 3 || goal.length > 500) return json({ error: "Provide a goal between 3 and 500 characters." }, 400);
+
+  const stored = await loadOperatingBrief(request, env);
+  const operatingBrief = stored || (typeof body.operatingBrief === "string" ? body.operatingBrief.trim() : "");
+  if (operatingBrief.length < 100) return json({ error: "No operating brief is saved yet. Fill in the operating brief before building a roadmap." }, 400);
+
+  const draftPrompt = `Goal: ${goal}\n\nFull operating brief:\n${operatingBrief}\n\n${ROADMAP_INSTRUCTION}`;
+  const draftRaw = await callDeepSeek(draftPrompt, 1400, env);
+  const draftEntries = parseRoadmap(draftRaw);
+  if (!draftEntries) return json({ error: "The live agent could not produce a roadmap draft." }, 502);
+  const draft = normalizeRoadmap(draftEntries);
+  if (!draft.length) return json({ error: "The live agent returned an empty roadmap." }, 502);
+
+  const critiquePrompt = `You are a critical reviewer for the Northstar roadmap planner. Given the goal, the operating brief, and the draft roadmap below, identify specific flaws.\n\nGoal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nDraft roadmap:\n${JSON.stringify(draft)}\n\nFind at least one concrete issue among:\n1. Wrong sequencing — is a niche placed before something it depends on?\n2. Irrelevant niches — does any niche fail to serve this goal?\n3. Missing niches — is a niche the brief treats as essential absent?\n4. Vague actions — is any step too abstract to start in one sitting?\n\nReturn only valid JSON with exactly: objections (array of strings, each a concise concrete issue), severity ("minor"|"major"|"critical"), suggestedDirection (string describing what should change, or null). Do not rubber-stamp — find real problems.`;
+  const critiqueRaw = await callDeepSeek(critiquePrompt, 500, env);
+  let critique = { objections: ["Critique could not be generated."], severity: "minor", suggestedDirection: null };
+  if (critiqueRaw) {
+    try {
+      const parsed = JSON.parse(critiqueRaw);
+      if (parsed && Array.isArray(parsed.objections)) critique = parsed;
+    } catch {}
+  }
+
+  const synthesisPrompt = `You are the final planner for the Northstar system. Consider the goal, the draft roadmap, and the critique below. Produce the best final roadmap.\n\nGoal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nDraft roadmap:\n${JSON.stringify(draft)}\n\nCritique:\n${JSON.stringify(critique)}\n\nIf the critique raised valid points, adjust the roadmap. If not, the draft stands.\n\n${ROADMAP_INSTRUCTION}`;
+  const synthesisRaw = await callDeepSeek(synthesisPrompt, 1400, env);
+  const synthesisEntries = parseRoadmap(synthesisRaw);
+  const roadmap = synthesisEntries ? normalizeRoadmap(synthesisEntries) : [];
+  const niches = roadmap.length ? roadmap : draft;
+  const changed = JSON.stringify(niches) !== JSON.stringify(draft);
+
+  const savedResponse = await supabase(request, env, "northstar_roadmaps", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Prefer: "return=representation" },
+    body: JSON.stringify({ owner_key: ownerKey, goal, niches }),
+  });
+  if (!savedResponse.ok) return savedResponse;
+  const saved = await savedResponse.json().catch(() => null);
+
+  // northstar_agent_state is keyed by agent, so each agent's steps collapse into one row.
+  const byAgent = new Map();
+  for (const entry of niches) {
+    const entryAgent = detectAgent(entry.niche);
+    for (const action of entry.actions) {
+      const agent = detectAgent(action.lane) || entryAgent;
+      if (!agent) continue;
+      if (!byAgent.has(agent)) byAgent.set(agent, []);
+      byAgent.get(agent).push(action.step);
+    }
+  }
+  const assigned = [];
+  for (const [agent, steps] of byAgent) {
+    await supabase(request, env, "northstar_agent_state?on_conflict=agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify({ agent, current_task: steps[0], status: "idle", detail: steps.join(" · "), updated_at: new Date().toISOString() }),
+    });
+    assigned.push({ agent, steps });
+  }
+
+  return json({ id: saved?.[0]?.id ?? null, goal, niches, changed, critique: critique.objections.join(" "), assigned });
+}
+
 export default {
   async fetch(request, env) {
     try {
@@ -269,6 +386,11 @@ export default {
         return analyze(request, env);
       }
       if (url.pathname === "/api/plan") { if (request.method !== "POST") return json({ error: "Method not allowed." }, 405); return createPlan(request, env); }
+      if (url.pathname === "/api/roadmap") {
+        if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+        if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
+        return createRoadmap(request, env);
+      }
       if (url.pathname.startsWith("/api/memory/")) return memory(request, env, url);
       return new Response(appHtml, {
         headers: {
