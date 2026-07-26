@@ -327,7 +327,7 @@ export function App() {
         <div className="activity-row"><input id="roadmap-goal" value={roadmapGoal} onChange={(event) => setRoadmapGoal(event.target.value)} placeholder="Describe the goal to sequence" /><button type="submit" disabled={roadmapBuilding}>{roadmapBuilding ? "Sequencing..." : "Build roadmap"}</button></div>
       </form>
       {roadmapError && <p role="alert" style={{ color: "#b42318", margin: "12px 0 0" }}>{roadmapError}</p>}
-      {roadmapBuilding && <p className="roadmap-progress"><Sparkles size={15} /> Draft, then critique, then synthesis. Deep mode takes a moment.</p>}
+      {roadmapBuilding && <p className="roadmap-progress"><Sparkles size={15} /> Sequencing your niches. This usually takes about ten seconds.</p>}
       {roadmap?.niches?.length ? <section className="roadmap-section">
         <div className="section-header"><div><span className="eyebrow">CURRENT ROADMAP</span><h2>{roadmap.goal}</h2><p>{roadmap.niches.length} niches sequenced.</p></div></div>
         <div className="roadmap-list">

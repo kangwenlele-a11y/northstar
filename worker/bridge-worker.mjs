@@ -14,13 +14,18 @@ const score = (value, fallback) => Number.isFinite(Number(value)) ? Math.max(1, 
 
 const isAuthorized = () => true;
 
-async function callDeepSeek(prompt, maxTokens, env) {
+class DeepSeekTimeout extends Error {}
+
+// timeoutMs > 0 makes a slow upstream throw DeepSeekTimeout instead of hanging
+// until the Worker is killed. Callers that omit it keep the old behaviour.
+async function callDeepSeek(prompt, maxTokens, env, timeoutMs = 0) {
   if (!env.SILICONFLOW_API_KEY) return json({ error: "The live agent has not been configured." }, 503);
   try {
     const upstream = await fetch("https://api.siliconflow.cn/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.SILICONFLOW_API_KEY}` },
       body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: maxTokens, temperature: 0.2, enable_thinking: false }),
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
     });
     if (!upstream.ok) {
       const errorBody = await upstream.text();
@@ -32,6 +37,7 @@ async function callDeepSeek(prompt, maxTokens, env) {
     if (typeof content !== "string") return null;
     return content.replace(/^```json\s*|^```|```$/gm, "").trim();
   } catch (error) {
+    if (timeoutMs && (error?.name === "TimeoutError" || error?.name === "AbortError")) throw new DeepSeekTimeout();
     console.error("DeepSeek exception", { message: error instanceof Error ? error.message : String(error) });
     return null;
   }
@@ -259,7 +265,9 @@ async function createPlan(request, env) {
   return json({ goal_id:goalId, steps:scheduled });
 }
 
-const ROADMAP_INSTRUCTION = `Given this goal and the full operating brief, produce a sequenced roadmap across the relevant niches. For each niche, in recommended order, return: niche, sequence_position, actions (2-4 concrete steps), reasoning (2-3 sentences on why this niche belongs at this position). Only include relevant niches. Respond ONLY as JSON array.`;
+// Bounded to keep generation inside the Worker execution limit — the upstream
+// model runs at roughly 20 tokens/sec, so output length drives wall-clock time.
+const ROADMAP_INSTRUCTION = `Given this goal and the full operating brief, produce a sequenced roadmap across the relevant niches. Return exactly 2 or 3 niches, never more. For each niche, in recommended order, return: niche, sequence_position, actions (2-3 concrete steps, each under 12 words), reasoning (2 sentences, under 35 words total, on why this niche belongs at this position). Only include relevant niches. Be terse. Respond ONLY as JSON array.`;
 
 // The endpoint takes only { goal }, so the brief is read from the stored profile.
 async function loadOperatingBrief(request, env) {
@@ -299,6 +307,7 @@ function normalizeRoadmap(entries) {
     }))
     .filter((entry) => entry.niche && entry.actions.length)
     .sort((a, b) => a.sequence_position - b.sequence_position)
+    .slice(0, 3)
     .map((entry, index) => ({ ...entry, sequence_position: index + 1 }));
 }
 
@@ -315,29 +324,19 @@ async function createRoadmap(request, env) {
   const operatingBrief = stored || (typeof body.operatingBrief === "string" ? body.operatingBrief.trim() : "");
   if (operatingBrief.length < 100) return json({ error: "No operating brief is saved yet. Fill in the operating brief before building a roadmap." }, 400);
 
-  const draftPrompt = `Goal: ${goal}\n\nFull operating brief:\n${operatingBrief}\n\n${ROADMAP_INSTRUCTION}`;
-  const draftRaw = await callDeepSeek(draftPrompt, 1400, env);
-  const draftEntries = parseRoadmap(draftRaw);
-  if (!draftEntries) return json({ error: "The live agent could not produce a roadmap draft." }, 502);
-  const draft = normalizeRoadmap(draftEntries);
-  if (!draft.length) return json({ error: "The live agent returned an empty roadmap." }, 502);
-
-  const critiquePrompt = `You are a critical reviewer for the Northstar roadmap planner. Given the goal, the operating brief, and the draft roadmap below, identify specific flaws.\n\nGoal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nDraft roadmap:\n${JSON.stringify(draft)}\n\nFind at least one concrete issue among:\n1. Wrong sequencing — is a niche placed before something it depends on?\n2. Irrelevant niches — does any niche fail to serve this goal?\n3. Missing niches — is a niche the brief treats as essential absent?\n4. Vague actions — is any step too abstract to start in one sitting?\n\nReturn only valid JSON with exactly: objections (array of strings, each a concise concrete issue), severity ("minor"|"major"|"critical"), suggestedDirection (string describing what should change, or null). Do not rubber-stamp — find real problems.`;
-  const critiqueRaw = await callDeepSeek(critiquePrompt, 500, env);
-  let critique = { objections: ["Critique could not be generated."], severity: "minor", suggestedDirection: null };
-  if (critiqueRaw) {
-    try {
-      const parsed = JSON.parse(critiqueRaw);
-      if (parsed && Array.isArray(parsed.objections)) critique = parsed;
-    } catch {}
+  // Single pass: the 3-pass deep flow exceeded the Worker execution limit.
+  const prompt = `Goal: ${goal}\n\nFull operating brief:\n${operatingBrief}\n\n${ROADMAP_INSTRUCTION}`;
+  let raw;
+  try {
+    raw = await callDeepSeek(prompt, 600, env, 18000);
+  } catch (error) {
+    if (error instanceof DeepSeekTimeout) return json({ error: "The roadmap agent took longer than 18 seconds. Try a shorter, more specific goal." }, 504);
+    throw error;
   }
-
-  const synthesisPrompt = `You are the final planner for the Northstar system. Consider the goal, the draft roadmap, and the critique below. Produce the best final roadmap.\n\nGoal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nDraft roadmap:\n${JSON.stringify(draft)}\n\nCritique:\n${JSON.stringify(critique)}\n\nIf the critique raised valid points, adjust the roadmap. If not, the draft stands.\n\n${ROADMAP_INSTRUCTION}`;
-  const synthesisRaw = await callDeepSeek(synthesisPrompt, 1400, env);
-  const synthesisEntries = parseRoadmap(synthesisRaw);
-  const roadmap = synthesisEntries ? normalizeRoadmap(synthesisEntries) : [];
-  const niches = roadmap.length ? roadmap : draft;
-  const changed = JSON.stringify(niches) !== JSON.stringify(draft);
+  const entries = parseRoadmap(raw);
+  if (!entries) return json({ error: "The live agent could not produce a roadmap." }, 502);
+  const niches = normalizeRoadmap(entries);
+  if (!niches.length) return json({ error: "The live agent returned an empty roadmap." }, 502);
 
   const savedResponse = await supabase(request, env, "northstar_roadmaps", {
     method: "POST",
@@ -368,7 +367,7 @@ async function createRoadmap(request, env) {
     assigned.push({ agent, steps });
   }
 
-  return json({ id: saved?.[0]?.id ?? null, goal, niches, changed, critique: critique.objections.join(" "), assigned });
+  return json({ id: saved?.[0]?.id ?? null, goal, niches, assigned });
 }
 
 export default {
