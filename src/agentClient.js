@@ -7,7 +7,7 @@ export function hasLiveAgentBridge() {
 export async function requestLiveAssessment({ activity, mission, operatingBrief, fallback, accessCode, mode = "quick" }) {
   const endpoint = bridgeUrl ? `${bridgeUrl}/v1/analyze` : "/api/analyze";
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
+  const timer = setTimeout(() => controller.abort(), 25000);
   let response;
   try {
     response = await fetch(endpoint, {
@@ -17,7 +17,7 @@ export async function requestLiveAssessment({ activity, mission, operatingBrief,
       signal: controller.signal,
     });
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error("Timed out after 20s. The agent did not respond in time — try a shorter activity.");
+    if (error?.name === "AbortError") throw new Error("Timed out after 25s. The agent did not respond in time — try a shorter activity.");
     throw new Error("Could not reach the agent. Check your connection and try again.");
   } finally {
     clearTimeout(timer);

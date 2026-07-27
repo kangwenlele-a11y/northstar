@@ -205,6 +205,7 @@ export function App() {
   const [roadmapBuilding, setRoadmapBuilding] = useState(false);
   const [roadmapError, setRoadmapError] = useState("");
   const [cloudStatus, setCloudStatus] = useState("connecting");
+  const [loadError, setLoadError] = useState("");
   const { store, setStore } = useCommandStore();
   useEffect(() => {
     Promise.all([memoryApi.profile(accessCode), memoryApi.decisions(accessCode), memoryApi.active(accessCode)]).then(([profiles, decisions, active]) => {
@@ -213,7 +214,13 @@ export function App() {
       const savedActive = active?.[0] ? { ...active[0], title: active[0].task, startedAt: active[0].started_at } : null;
       setStore((current) => ({ ...current, mission: profile?.mission || current.mission, operatingDraft: profile?.operating_brief?.text || current.operatingDraft, decisions: mapped.length ? mapped : current.decisions, active: savedActive }));
       setCloudStatus("synced");
-    }).catch(() => setCloudStatus("error"));
+      setLoadError("");
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : "Could not load your saved data.";
+      if (message === "Access code rejected.") setAccessCode("");
+      setCloudStatus("error");
+      setLoadError(message);
+    });
   }, [accessCode]);
   const cloudWrite = (request) => {
     setCloudStatus("syncing");
@@ -304,6 +311,7 @@ export function App() {
         result._draft = response.draft || null;
         result._critique = response.critique || null;
         result._changed = response.changed || false;
+        result._degraded = response.degraded || null;
         result._mode = checkMode;
         setAgentMode("live");
       } catch (error) {
@@ -440,6 +448,7 @@ export function App() {
 
     <section className="command-main">
       <div className={`cloud-state ${cloudStatus}`}><i />{cloudStatus === "synced" ? "Cloud synced" : cloudStatus === "syncing" ? "Saving to cloud..." : cloudStatus === "error" ? "Cloud save failed" : "Connecting to cloud..."}</div>
+      {loadError && <p role="alert" className="load-error">Could not load your saved data: {loadError}</p>}
       {view === "roadmap" ? <>
       <header className="command-header">
         <div><p className="eyebrow">SEQUENCED PLAN</p><h1>Know which niche comes first.</h1><p className="subhead">Give the agents one goal. They sequence the relevant niches, then hand any agent-lane steps to Codex, Hermes and OpenClaw.</p></div>
@@ -517,6 +526,7 @@ export function App() {
       {analysis ? <section className="analysis-grid">
         <article className="decision-card"><div className="decision-top"><div><span className="eyebrow">AGENT VERDICT</span><h2>{analysis.verdict}</h2></div><span className={`verdict ${analysis.verdict.toLowerCase().replace(" ", "-")}`}>{analysis.lane.replace("automation", "AI automation")}</span></div><p className="activity-quote">"{analysis.activity}"</p><p className="decision-reason">{analysis.reason}</p><div className="score-pair"><Score label="Long-term compounding" value={analysis.longTerm} accent="#00a58b" /><Score label="Short-term return" value={analysis.shortTerm} accent="#4c80ff" /></div><div className="decision-action"><div><span>Next smallest move</span><strong>{analysis.nextAction}</strong></div><button className="start-button" onClick={startFocus}><Play size={15} /> Start focus</button></div></article>
         <article className="agent-discussion"><div className="discussion-title"><Bot size={17} /><h3>Agent discussion</h3><span>{agentMode === "live" ? "Live" : "Local"}</span></div><div className="thought"><span className="agent-initial teal">S</span><div><strong>{analysis.agent || "Strategist"}</strong><p>{analysis.longTerm >= 7 ? "This creates a reusable asset or strengthens the company's core direction." : "This does not yet show a strong path to a reusable asset. Tighten the outcome first."}</p></div></div><div className="thought"><span className="agent-initial blue">O</span><div><strong>Operator</strong><p>{analysis.shortTerm >= 7 ? "There is a clear short-term payoff. Protect a time box and define the measurable result." : "The immediate return is limited. Only do this after your essential work is protected."}</p></div></div><div className="thought"><span className="agent-initial amber">G</span><div><strong>Guardian</strong><p>Keep the work bounded. A good priority can still become avoidance when it has no finish line.</p></div></div><div className="bridge-note"><LockKeyhole size={14} /> {agentMode === "live" ? "Live response received from your secure agent bridge." : agentMode === "fallback" ? "Live bridge did not respond, so Northstar used the local strategic model." : "Local strategic model active. Add a secure agent bridge to use live Hermes or OpenAI agents."}</div>
+          {analysis._degraded ? <p className="degraded-note"><Clock3 size={14} /> {analysis._degraded}</p> : null}
           {analysis._mode === "deep" && analysis._draft ? <div className="reasoning-section"><button className="reasoning-toggle" onClick={() => setShowReasoning((v) => !v)}><span><Bot size={15} /> How we got here{analysis._changed ? <span className="changed-badge">Critique changed outcome</span> : <span className="unchanged-badge">Critique confirmed draft</span>}</span><span className="reasoning-arrow">{showReasoning ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</span></button>{showReasoning ? <div className="reasoning-trace"><div className="reasoning-step draft-step"><span className="step-label">Draft</span><div className="step-content"><div className="score-pair"><Score label="Long-term" value={analysis._draft.longTerm} accent="#00a58b" /><Score label="Short-term" value={analysis._draft.shortTerm} accent="#4c80ff" /></div><p><strong>Verdict:</strong> {analysis._draft.verdict} · <strong>Lane:</strong> {analysis._draft.lane}</p><p>{analysis._draft.reason}</p></div></div><div className="reasoning-step critique-step"><span className="step-label">Critique</span><div className="step-content"><p>{analysis._critique}</p></div></div><div className="reasoning-step synthesis-step"><span className="step-label">Synthesis</span><div className="step-content"><div className="score-pair"><Score label="Long-term" value={analysis._draft.longTerm} accent="#00a58b" /><Score label="Short-term" value={analysis._draft.shortTerm} accent="#4c80ff" /></div><p><strong>Verdict:</strong> {analysis.verdict} · <strong>Lane:</strong> {analysis.lane}</p><p>{analysis.reason}</p><p className="synthesis-note">{analysis._changed ? "The critique changed the final outcome." : "The critique confirmed the draft was sound."}</p></div></div></div> : null}</div> : null}
         </article>
       </section> : <section className="empty-analysis"><Sparkles size={22} /><div><strong>Your agents are standing by.</strong><p>Describe the activity in plain language. They will weigh immediate payoff, long-term leverage, and the cost to your attention.</p></div></section>}

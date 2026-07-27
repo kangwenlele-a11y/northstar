@@ -16,7 +16,11 @@ const score = (value, fallback) => Number.isFinite(Number(value)) ? Math.max(1, 
 // Worker at roughly 22s, so a request that outlives the budget is useless even
 // if it eventually succeeds — better to return a readable 504.
 const AGENT_BUDGET_MS = 18000;
-const startBudget = () => Date.now() + AGENT_BUDGET_MS;
+// Deep mode makes three sequential round trips and writes nothing to Supabase,
+// so it can afford a slightly larger slice than routes that follow up with DB
+// work. Everything stays under the ~22s the browser is willing to wait.
+const DEEP_BUDGET_MS = 20000;
+const startBudget = (ms = AGENT_BUDGET_MS) => Date.now() + ms;
 const remainingMs = (deadline) => Math.max(1000, deadline - Date.now());
 
 const isAuthorized = () => true;
@@ -75,48 +79,57 @@ async function supabase(request, env, path, options = {}) {
   return response;
 }
 
+// Relays a Supabase result to the client with its status intact. Returning the
+// body under a bare 200 made every upstream failure look like a success.
+async function passthrough(result) {
+  return new Response(await result.text(), {
+    status: result.status,
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
 async function memory(request, env, url) {
   try {
   if (!isAuthorized(request, env)) return json({ error: "Access code required." }, 401);
   const path = url.pathname.replace("/api/memory/", "");
   if (path === "state" && request.method === "GET") {
     const result = await supabase(request, env, "northstar_agent_state?select=*&order=agent.asc");
-    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+    return passthrough(result);
   }
   if (path.startsWith("state/") && request.method === "PUT") {
     const agent = path.split("/")[1];
     if (!['richard', 'claude', 'codex', 'hermes', 'openclaw'].includes(agent)) return json({ error: "Unknown agent." }, 400);
     const body = await request.json();
     const result = await supabase(request, env, "northstar_agent_state?on_conflict=agent", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ agent, current_task: body.current_task || null, status: body.status || 'idle', detail: body.detail || null, blocked_reason: body.blocked_reason || null, updated_at: new Date().toISOString() }) });
-    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+    return passthrough(result);
   }
   if (path === "profile") {
     if (request.method === "GET") {
       const result = await supabase(request, env, `northstar_profiles?owner_key=eq.${ownerKey}&select=mission,operating_brief`);
-      if (result instanceof Response && result.headers.get("Content-Type")?.includes("application/json")) return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+      return passthrough(result);
     }
     if (request.method === "PUT") {
       const body = await request.json();
       const result = await supabase(request, env, "northstar_profiles?on_conflict=owner_key", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ owner_key: ownerKey, mission: body.mission, operating_brief: body.operating_brief, updated_at: new Date().toISOString() }) });
-      return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+      return passthrough(result);
     }
   }
   if (path === "decisions" && request.method === "GET") {
     const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 50));
     const result = await supabase(request, env, `northstar_decisions?owner_key=eq.${ownerKey}&select=*&order=created_at.desc&limit=${limit}`);
-    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+    return passthrough(result);
   }
   if (path === "decisions" && request.method === "POST") {
     const body = await request.json();
     const result = await supabase(request, env, "northstar_decisions", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "return=representation" }, body: JSON.stringify({ owner_key: ownerKey, activity: body.activity, long_term_score: body.longTerm, short_term_score: body.shortTerm, lane: body.lane, verdict: body.verdict, reason: body.reason, next_action: body.nextAction }) });
-    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+    return passthrough(result);
   }
   if (path === "daily") {
     if (request.method === "GET") {
       const date = url.searchParams.get("date");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return json({ error: "Invalid date." }, 400);
       const result = await supabase(request, env, `northstar_daily_blocks?owner_key=eq.${ownerKey}&date=eq.${date}&select=*,northstar_goals(title)&order=hour.asc`);
-      return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+      return passthrough(result);
     }
     if (request.method === "PUT") {
       const body = await request.json();
@@ -124,12 +137,12 @@ async function memory(request, env, url) {
         ? JSON.stringify({ version: 1, task: body.task, blockedReason: body.blocked_reason })
         : body.task;
       const result = await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ owner_key: ownerKey, date: body.date, hour: body.hour, task, lane: body.lane, done: body.done, goal_id: body.goal_id || null, updated_at: new Date().toISOString() }) });
-      return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+      return passthrough(result);
     }
   }
   if (path === "roadmaps" && request.method === "GET") {
     const result = await supabase(request, env, `northstar_roadmaps?owner_key=eq.${ownerKey}&select=*&order=created_at.desc&limit=10`);
-    return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+    return passthrough(result);
   }
   if (path.startsWith("roadmaps/") && request.method === "PUT") {
     const id = path.split("/")[1];
@@ -141,21 +154,22 @@ async function memory(request, env, url) {
       headers: { "Content-Type": "application/json", Prefer: "return=representation" },
       body: JSON.stringify({ niches: body.niches }),
     });
-    return new Response(await result.text(), { status: result.status, headers: { "Content-Type": "application/json" } });
+    return passthrough(result);
   }
   if (path === "active-focus") {
     if (request.method === "GET") {
       const result = await supabase(request, env, `northstar_active_focus?owner_key=eq.${ownerKey}&select=*`);
-      return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+      return passthrough(result);
     }
     if (request.method === "PUT") {
       const body = await request.json();
       if (!body.task) {
         const result = await supabase(request, env, `northstar_active_focus?owner_key=eq.${ownerKey}`, { method: "DELETE" });
-        return new Response(null, { status: result.status });
+        if (!result.ok) return passthrough(result);
+        return new Response(null, { status: 204 });
       }
       const result = await supabase(request, env, "northstar_active_focus?on_conflict=owner_key", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ owner_key: ownerKey, task: body.task, lane: body.lane, started_at: body.started_at, updated_at: new Date().toISOString() }) });
-      return new Response(await result.text(), { headers: { "Content-Type": "application/json" } });
+      return passthrough(result);
     }
   }
     return json({ error: "Not found." }, 404);
@@ -218,7 +232,7 @@ async function analyze(request, env) {
   const draftPrompt = `You are the Northstar Strategist for a founder building an AI-first automation company. Use the full operating brief as the source of truth, not just the short mission.\n\nShort mission:\n${mission}\n\nFull operating brief:\n${operatingBrief}\n\nActivity: ${activity}\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move). Be direct. Prioritize reusable systems, automation, software, data, and learning. Treat e-commerce work as cash flow and a testing environment. Keep investing low priority unless essential. Do not use markdown.`;
 
   // One budget spans all three passes, not 18s each.
-  const deadline = startBudget();
+  const deadline = startBudget(mode === "deep" ? DEEP_BUDGET_MS : AGENT_BUDGET_MS);
   const draftRaw = await callDeepSeek(draftPrompt, 180, env, remainingMs(deadline));
   if (!draftRaw) return json({ error: "AI unavailable. The live Strategist could not produce a draft." }, 502);
   const draft = parseAssessment(draftRaw);
@@ -239,7 +253,25 @@ async function analyze(request, env) {
 
   const critiquePrompt = `You are a critical reviewer for the Northstar decision system. Given the original question, the operating brief, and the draft assessment below, identify specific flaws.\n\nOriginal question: ${activity}\n\nOperating brief:\n${operatingBrief}\n\nDraft assessment:\n${JSON.stringify(draft)}\n\nFind at least one concrete issue among:\n1. Wrong niche/lane assignment — does the suggested lane match the activity and stated priorities?\n2. Missed dependencies — does the plan assume things that are not in place?\n3. Unrealistic timeboxing — is the suggested next action achievable in 30-60 minutes?\n4. Contradictions with stated priorities — does the verdict contradict the operating brief?\n\nReturn only valid JSON with exactly: objections (array of strings, each a concise concrete issue), severity ("minor"|"major"|"critical"), suggestedDirection (string describing what should change, or null). Do not rubber-stamp — find real problems.`;
 
-  const critiqueRaw = await callDeepSeek(critiquePrompt, 300, env, remainingMs(deadline));
+  // Deep mode makes three sequential round trips against an upstream whose
+  // latency is unpredictable, so the review passes regularly outrun the budget.
+  // The draft is already good enough to return — degrade to it rather than
+  // throwing away a usable answer and erroring.
+  const degraded = () => json({
+    final: scoreResult(draft),
+    draft: null,
+    critique: null,
+    changed: false,
+    degraded: "Deep review ran out of time, so this is the first-pass answer.",
+  });
+
+  let critiqueRaw;
+  try {
+    critiqueRaw = await callDeepSeek(critiquePrompt, 300, env, remainingMs(deadline));
+  } catch (error) {
+    if (error instanceof DeepSeekTimeout) return degraded();
+    throw error;
+  }
   let critique = { objections: ["Critique could not be generated."], severity: "minor", suggestedDirection: null };
   if (critiqueRaw) {
     try {
@@ -250,10 +282,16 @@ async function analyze(request, env) {
 
   const synthesisPrompt = `You are the final decision-maker for the Northstar system. Consider the original question, the draft assessment, and the critique below. Produce the best final verdict.\n\nOriginal question: ${activity}\n\nOperating brief:\n${operatingBrief}\n\nDraft:\n${JSON.stringify(draft)}\n\nCritique:\n${JSON.stringify(critique)}\n\nIf the critique raised valid points, adjust your answer. If not, the draft stands.\n\nReturn only valid JSON with exactly: longTerm (integer 1-10), shortTerm (integer 1-10), lane (automation|agency|art|creator|personal), verdict (Do now|Schedule|Protect|Park it), reason (max 2 concise sentences), nextAction (one concrete 30-60 minute move), addressedCritique (boolean), finalReasoning (string explaining how the critique changed or did not change the answer). Do not use markdown.`;
 
-  const synthesisRaw = await callDeepSeek(synthesisPrompt, 300, env, remainingMs(deadline));
-  if (!synthesisRaw) return json({ error: "AI unavailable. The live Strategist could not produce a synthesis." }, 502);
+  let synthesisRaw;
+  try {
+    synthesisRaw = await callDeepSeek(synthesisPrompt, 300, env, remainingMs(deadline));
+  } catch (error) {
+    if (error instanceof DeepSeekTimeout) return degraded();
+    throw error;
+  }
+  if (!synthesisRaw) return degraded();
   const synthesis = parseAssessment(synthesisRaw);
-  if (!synthesis) return json({ error: "The live agent returned an invalid synthesis." }, 502);
+  if (!synthesis) return degraded();
 
   const final = scoreResult(synthesis);
   const draftResult = scoreResult(draft);

@@ -36,8 +36,8 @@ export const memoryApi = {
   saveActive: (code, data) => request(code, "/active-focus", { method: "PUT", body: JSON.stringify(data) }),
   agentState: (code) => request(code, "/state"),
   saveAgentState: (code, agent, data) => request(code, `/state/${encodeURIComponent(agent)}`, { method: "PUT", body: JSON.stringify(data) }),
-  plan: (code, goal, operatingBrief) => request(code, "/../plan", { method: "POST", timeoutMs: 20000, body: JSON.stringify({ goal, operatingBrief }) }),
+  plan: (code, goal, operatingBrief) => request(code, "/../plan", { method: "POST", timeoutMs: 25000, body: JSON.stringify({ goal, operatingBrief }) }),
   roadmaps: (code) => request(code, "/roadmaps"),
   saveRoadmap: (code, id, niches) => request(code, `/roadmaps/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ niches }) }),
-  buildRoadmap: (code, goal) => request(code, "/../roadmap", { method: "POST", timeoutMs: 20000, body: JSON.stringify({ goal }) }),
+  buildRoadmap: (code, goal) => request(code, "/../roadmap", { method: "POST", timeoutMs: 25000, body: JSON.stringify({ goal }) }),
 };
