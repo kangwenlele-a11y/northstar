@@ -1,7 +1,8 @@
 const model = "deepseek-ai/DeepSeek-V4-Flash";
-const lanes = new Set(["automation", "agency", "art", "creator", "personal"]);
+const planLanes = new Set(["automation", "agency", "art", "creator", "personal"]);
+const agentLanes = new Set(["codex", "hermes", "openclaw"]);
+const allWorkLanes = new Set([...planLanes, ...agentLanes]);
 const verdicts = new Set(["Do now", "Schedule", "Protect", "Park it"]);
-const agentLanes = ["codex", "hermes", "openclaw"];
 const ownerKey = "richard";
 /* __NORTHSTAR_APP_HTML__ */
 
@@ -136,7 +137,9 @@ async function memory(request, env, url) {
       const task = body.blocked_reason
         ? JSON.stringify({ version: 1, task: body.task, blockedReason: body.blocked_reason })
         : body.task;
-      const result = await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ owner_key: ownerKey, date: body.date, hour: body.hour, task, lane: body.lane, done: body.done, goal_id: body.goal_id || null, updated_at: new Date().toISOString() }) });
+      const fields = { owner_key: ownerKey, date: body.date, hour: body.hour, task, lane: body.lane, done: body.done, goal_id: body.goal_id || null, updated_at: new Date().toISOString() };
+      if (body.niche) fields.niche = body.niche;
+      const result = await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(fields) });
       return passthrough(result);
     }
   }
@@ -201,7 +204,7 @@ async function assess(request, env) {
   return json({
     longTerm: score(answer.longTerm, score(fallback.longTerm, 5)),
     shortTerm: score(answer.shortTerm, score(fallback.shortTerm, 5)),
-    lane: lanes.has(answer.lane) ? answer.lane : fallback.lane,
+    lane: planLanes.has(answer.lane) ? answer.lane : fallback.lane,
     verdict: verdicts.has(answer.verdict) ? answer.verdict : fallback.verdict,
     reason: typeof answer.reason === "string" ? answer.reason.slice(0, 480) : fallback.reason,
     nextAction: typeof answer.nextAction === "string" ? answer.nextAction.slice(0, 300) : fallback.nextAction,
@@ -241,7 +244,7 @@ async function analyze(request, env) {
   const scoreResult = (raw) => ({
     longTerm: score(raw.longTerm, score(fallback.longTerm, 5)),
     shortTerm: score(raw.shortTerm, score(fallback.shortTerm, 5)),
-    lane: lanes.has(raw.lane) ? raw.lane : fallback.lane,
+    lane: planLanes.has(raw.lane) ? raw.lane : fallback.lane,
     verdict: verdicts.has(raw.verdict) ? raw.verdict : fallback.verdict,
     reason: typeof raw.reason === "string" ? raw.reason.slice(0, 480) : fallback.reason,
     nextAction: typeof raw.nextAction === "string" ? raw.nextAction.slice(0, 300) : fallback.nextAction,
@@ -311,24 +314,37 @@ async function createPlan(request, env) {
   try { body = await request.json(); } catch { return json({ error: "Invalid request." }, 400); }
   const goal = typeof body.goal === "string" ? body.goal.trim() : "";
   const operatingBrief = typeof body.operatingBrief === "string" ? body.operatingBrief.trim() : "";
+  const niche = typeof body.niche === "string" ? body.niche.trim().toLowerCase() : "";
   if (goal.length < 3 || goal.length > 500 || operatingBrief.length < 100) return json({ error: "Provide a valid goal and operating brief." }, 400);
-  // detail was previously unbounded, so output landed on the max_tokens ceiling
-  // and truncated mid-JSON, surfacing as "Planner returned invalid steps".
-  const prompt = `Given this goal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nReturn only JSON array of 3-5 ordered steps. Each object: title (under 10 words), detail (one sentence, under 20 words), estimated_minutes, lane (agency|art|creatorconnect|personal|codex|hermes|openclaw), depends_on (prior step index or null). Be terse.`;
+
+  // Single LLM call — classify complexity AND produce tasks in one round trip.
+  const prompt = `Given this goal: ${goal}\n\nOperating brief:\n${operatingBrief}\n\nClassify the goal's complexity and return tasks in ONE JSON object.
+
+A goal is "simple" when it describes one concrete action the user could just do (edit prices, upload a listing, reply to a client, post one video). A single clear action is simple even if it takes an hour.
+
+A goal is "complex" when it requires sequencing multiple distinct activities with real dependencies or unknowns — decisions, building, or multi-step outcomes.
+
+Return only valid JSON with exactly:
+- complexity: "simple" or "complex"
+- tasks: array of steps
+
+If simple: tasks has exactly 1 item. Return the goal verbatim or lightly cleaned as that single step title. detail is a one-sentence description. estimated_minutes reflects the actual time. depends_on is null.
+
+If complex: tasks has 3-6 items. Each item: title (under 10 words), detail (one sentence, under 20 words), estimated_minutes, depends_on (prior step index or null, first step has null).
+
+The niche is already known from the form field — do NOT infer or assign lane. The system will handle niche assignment separately. Be terse.`;
   const raw = await callDeepSeek(prompt, 900, env, remainingMs(startBudget()));
   if (!raw) return json({ error: "Planner unavailable. The live planner could not be reached." }, 502);
-  let steps;
-  try { steps = JSON.parse(raw); } catch { return json({ error: "The planner returned a response that could not be read. Try a shorter goal." }, 502); }
-  if (!Array.isArray(steps)) steps = Array.isArray(steps?.steps) ? steps.steps : null;
+  let steps, complexity;
+  try { const parsed = JSON.parse(raw); complexity = parsed.complexity; steps = parsed.tasks; } catch { return json({ error: "The planner returned a response that could not be read. Try a shorter goal." }, 502); }
   if (!Array.isArray(steps) || !steps.length) return json({ error: "The planner returned no steps." }, 502);
   const goalResponse = await supabase(request, env, "northstar_goals", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "return=representation" }, body: JSON.stringify({ title: goal }) });
   const goals = await goalResponse.json(); const goalId = goals?.[0]?.id;
   const today = new Date(); let hour = Math.max(9, today.getHours() + 1); let day = today.toISOString().slice(0, 10); const scheduled=[];
   for (let index=0; index<Math.min(8, steps.length); index++) { const step=steps[index]; if(hour>21){ today.setDate(today.getDate()+1); day=today.toISOString().slice(0,10); hour=9; }
-    const lane = ["agency","art","creatorconnect","personal","codex","hermes","openclaw"].includes(step.lane) ? step.lane : "personal";
-    await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method:"POST", headers:{"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"}, body:JSON.stringify({owner_key:ownerKey,date:day,hour,task:`${step.title}: ${step.detail}`,lane,goal_id:goalId,depends_on:Number.isInteger(step.depends_on)?step.depends_on:null,done:false}) });
-    scheduled.push({ ...step, date:day, hour }); if (["codex","hermes","openclaw"].includes(lane)) await supabase(request, env, "northstar_agent_state?on_conflict=agent", {method:"POST",headers:{"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"},body:JSON.stringify({agent:lane,current_task:step.title,status:"idle",detail:step.detail,updated_at:new Date().toISOString()})}); hour += Math.max(1, Math.ceil((Number(step.estimated_minutes)||60)/60)); }
-  return json({ goal_id:goalId, steps:scheduled });
+    await supabase(request, env, "northstar_daily_blocks?on_conflict=owner_key,date,hour", { method:"POST", headers:{"Content-Type":"application/json",Prefer:"resolution=merge-duplicates"}, body:JSON.stringify({owner_key:ownerKey,date:day,hour,task:`${step.title}: ${step.detail}`,niche,goal_id:goalId,depends_on:Number.isInteger(step.depends_on)?step.depends_on:null,done:false}) });
+    scheduled.push({ ...step, date:day, hour, niche }); hour += Math.max(1, Math.ceil((Number(step.estimated_minutes)||60)/60)); }
+  return json({ goal_id:goalId, niche, complexity, steps:scheduled });
 }
 
 // Bounded to keep generation inside the Worker execution limit — the upstream
@@ -377,7 +393,7 @@ function normalizeRoadmap(entries) {
     .map((entry, index) => ({ ...entry, sequence_position: index + 1 }));
 }
 
-const detectAgent = (value) => agentLanes.find((agent) => new RegExp(`\\b${agent}\\b`).test(String(value || "").toLowerCase())) || null;
+const detectAgent = (value) => { for (const agent of agentLanes) { if (new RegExp(`\\b${agent}\\b`).test(String(value || "").toLowerCase())) return agent; } return null; };
 
 async function createRoadmap(request, env) {
   if (!env.SILICONFLOW_API_KEY) return json({ error: "The live agent has not been configured." }, 503);

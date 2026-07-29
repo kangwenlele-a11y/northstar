@@ -36,6 +36,15 @@ const LANES = [
   { id: "personal", label: "Personal / rest", color: "#6b9665", tint: "#e8f4e6" },
 ];
 
+const NICHES = [
+  { id: "current_job", label: "Current job (cash flow) — Shopify / TikTok Shop / eBay", emoji: "💼" },
+  { id: "ai_automation", label: "AI automation business", emoji: "🤖" },
+  { id: "ielts", label: "English / IELTS personal brand", emoji: "📚" },
+  { id: "vibe_coding", label: "AI software & vibe coding", emoji: "⚡" },
+  { id: "investing", label: "AI-assisted investing", emoji: "📈" },
+  { id: "self_improvement", label: "Self-improvement", emoji: "🧠" },
+];
+
 const DEFAULT_MISSION = "Build a durable AI-first company by turning recurring work into reusable systems, products, and knowledge.";
 const OPERATING_DRAFT = `Career & Business Operating Summary
 
@@ -80,7 +89,7 @@ const shiftDate = (key, amount) => {
 };
 const formatHour = (hour) => `${hour % 12 || 12}:00 ${hour < 12 ? "AM" : "PM"}`;
 const formatDate = (key) => parseDateKey(key).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-const emptyDay = () => ({ goal: "", goalId: null, blocks: {}, energy: "steady" });
+const emptyDay = () => ({ goal: "", goalId: null, nicheGoals: {}, blocks: {}, energy: "steady" });
 
 function scoreActivity(value) {
   const input = value.toLowerCase();
@@ -196,9 +205,10 @@ export function App() {
   const [showMission, setShowMission] = useState(false);
   const [showOperatingDraft, setShowOperatingDraft] = useState(false);
   const [agentStates, setAgentStates] = useState([]);
-  const [goal, setGoal] = useState("");
-  const [planning, setPlanning] = useState(false);
-  const [planError, setPlanError] = useState("");
+  const [nicheGoals, setNicheGoals] = useState(Object.fromEntries(NICHES.map((n) => [n.id, ""])));
+  const [planningNiches, setPlanningNiches] = useState({});
+  const [planErrors, setPlanErrors] = useState({});
+  const [activeGoalNiche, setActiveGoalNiche] = useState(null);
   const [view, setView] = useState("command");
   const [roadmapGoal, setRoadmapGoal] = useState("");
   const [roadmap, setRoadmap] = useState(null);
@@ -263,6 +273,7 @@ export function App() {
         }];
       }));
       const remoteGoal = rows.find((row) => row.northstar_goals?.title)?.northstar_goals?.title || "";
+      const remoteNiche = rows.find((row) => row.niche)?.niche || null;
       setStore((current) => ({
         ...current,
         days: {
@@ -272,6 +283,7 @@ export function App() {
             goal: remoteGoal || current.days[date]?.goal || "",
             goalId: rows[0]?.goal_id || current.days[date]?.goalId || null,
             blocks: remoteBlocks,
+            nicheGoals: current.days[date]?.nicheGoals || {},
           },
         },
       }));
@@ -338,7 +350,7 @@ export function App() {
   };
   const saveBlock = (hour, block) => {
     updateDay({ ...day, blocks: { ...day.blocks, [hour]: block } });
-    cloudWrite(memoryApi.saveDaily(accessCode, { date, hour, task: block.task, lane: block.laneId, done: block.done, blocked_reason: block.blockedReason || null, goal_id: block.goalId || day.goalId || null })).catch(() => {});
+    cloudWrite(memoryApi.saveDaily(accessCode, { date, hour, task: block.task, lane: block.laneId, done: block.done, blocked_reason: block.blockedReason || null, goal_id: block.goalId || day.goalId || null, niche: block.niche || null })).catch(() => {});
     setEditingHour(null);
   };
   const copyYesterday = () => {
@@ -346,13 +358,12 @@ export function App() {
     if (!prior) return;
     updateDay({ ...day, blocks: Object.fromEntries(Object.entries(prior.blocks).map(([hour, block]) => [hour, { ...block, done: false }])) });
   };
-  const createPlan = async (event) => {
-    event.preventDefault();
-    if (!goal.trim()) return;
-    setPlanning(true);
-    setPlanError("");
+  const pinNicheGoal = async (nicheId, goalText) => {
+    if (!goalText.trim()) return;
+    setPlanningNiches((p) => ({ ...p, [nicheId]: true }));
+    setPlanErrors((p) => ({ ...p, [nicheId]: "" }));
     try {
-      const result = await memoryApi.plan(accessCode, goal.trim(), store.operatingDraft);
+      const result = await memoryApi.plan(accessCode, goalText.trim(), store.operatingDraft, nicheId);
       const generated = Array.isArray(result?.steps) ? result.steps : [];
       const planDate = generated[0]?.date || date;
       const planBlocks = Object.fromEntries(generated.filter((step) => step.date === planDate).map((step) => [step.hour, {
@@ -361,6 +372,7 @@ export function App() {
         done: false,
         blockedReason: "",
         goalId: result.goal_id,
+        niche: nicheId,
       }]));
       setDate(planDate);
       setStore((current) => ({
@@ -369,17 +381,16 @@ export function App() {
           ...current.days,
           [planDate]: {
             ...(current.days[planDate] || emptyDay()),
-            goal: goal.trim(),
-            goalId: result.goal_id,
-            blocks: planBlocks,
+            nicheGoals: { ...(current.days[planDate]?.nicheGoals || {}), [nicheId]: { text: goalText.trim(), goalId: result.goal_id } },
+            blocks: { ...(current.days[planDate]?.blocks || {}), ...planBlocks },
           },
         },
       }));
-      setGoal("");
+      setNicheGoals((g) => ({ ...g, [nicheId]: "" }));
     } catch (error) {
-      setPlanError(error instanceof Error ? error.message : "Planner unavailable.");
+      setPlanErrors((p) => ({ ...p, [nicheId]: error instanceof Error ? error.message : "Planner unavailable." }));
     } finally {
-      setPlanning(false);
+      setPlanningNiches((p) => ({ ...p, [nicheId]: false }));
     }
   };
   const buildRoadmap = async (event) => {
@@ -489,32 +500,65 @@ export function App() {
         </button>
         {showOperatingDraft && <div className="draft-body"><div className="strategy-lens"><span>Priority lens</span><strong>AI automation → cash-flow learning → English / software → self-improvement</strong><small>AI-assisted investing stays low priority until your controlled businesses are stronger.</small></div><textarea value={store.operatingDraft} onChange={(event) => setStore((current) => ({ ...current, operatingDraft: event.target.value }))} aria-label="Operating brief draft" /></div>}
       </section>
-      <form className="activity-form" onSubmit={createPlan}>
-        <label htmlFor="goal">What must be true by the end of today?</label>
-        <div className="activity-row"><input id="goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="Example: improve the Shopify homepage until the banner is clear" /><button type="submit" disabled={planning}>{planning ? "Breaking it down..." : "Pin today's goal"}</button></div>
-        {planError && <p role="alert" style={{ color: "#b42318", margin: "10px 0 0", fontSize: 12 }}>{planError}</p>}
-      </form>
+      <section className="niche-goals-section">
+        <div className="section-header"><div><span className="eyebrow">DAILY GOALS BY NICHE</span><h2>What must be true by the end of today?</h2><p>Fill in the niches you want to work on. Empty fields are skipped.</p></div></div>
+        <div className="niche-form-grid">
+          {NICHES.map((niche) => {
+            const planning = planningNiches[niche.id];
+            const error = planErrors[niche.id];
+            return <div key={niche.id} className="niche-form-card">
+              <div className="niche-form-label"><span>{niche.emoji}</span><strong>{niche.label}</strong></div>
+              <div className="niche-form-row">
+                <textarea
+                  value={nicheGoals[niche.id] || ""}
+                  onChange={(event) => setNicheGoals((g) => ({ ...g, [niche.id]: event.target.value }))}
+                  placeholder="Describe what must be true today in this niche..."
+                  rows={2}
+                  aria-label={`Goal for ${niche.label}`}
+                />
+                <button
+                  type="button"
+                  className="niche-pin-button"
+                  disabled={planning || !(nicheGoals[niche.id] || "").trim()}
+                  onClick={() => pinNicheGoal(niche.id, nicheGoals[niche.id] || "")}
+                >{planning ? "Breaking down..." : "📌 Pin"}</button>
+              </div>
+              {error && <p role="alert" className="niche-form-error">{error}</p>}
+            </div>;
+          })}
+        </div>
+      </section>
 
       {activeLane && <section className="active-strip" style={{ "--active": activeLane.color }}><CircleDot size={16} /><span>In focus now</span><strong>{store.active.title}</strong><button onClick={clearActive}>End focus</button></section>}
 
-      {day.goal && <section className="today-board">
-        <div className="board-head">
-          <div><span className="eyebrow">TODAY'S WORKFLOW</span><h2>{day.goal}</h2><p>{completed} of {orderedSteps.length} steps complete</p></div>
-          <div className="board-progress" aria-label={`${completed} of ${orderedSteps.length} complete`}><i style={{ width: `${orderedSteps.length ? completed / orderedSteps.length * 100 : 0}%` }} /></div>
-        </div>
-        <div className="daily-steps">
-          {orderedSteps.map(([hour, block], index) => <DailyStep
-            key={hour}
-            index={index}
-            block={block}
-            isNext={index === nextStepIndex}
-            onToggle={() => saveBlock(hour, { ...block, done: !block.done, blockedReason: block.done ? block.blockedReason : "" })}
-            onBlock={(blockedReason) => saveBlock(hour, { ...block, blockedReason })}
-            onStart={() => startDailyStep(block)}
-          />)}
-        </div>
-        {!orderedSteps.length && <p className="board-empty">The goal is pinned. Add a step below or rebuild the plan.</p>}
-      </section>}
+      {day.nicheGoals && Object.keys(day.nicheGoals).length > 0 && Object.values(day.nicheGoals).some((ng) => ng?.text?.trim()) && <div className="niche-boards">
+        {NICHES.map((niche) => {
+          const nicheGoal = day.nicheGoals?.[niche.id];
+          if (!nicheGoal?.text?.trim()) return null;
+          const nicheBlocks = Object.entries(day.blocks || {}).filter(([, block]) => block.niche === niche.id || block.niche === undefined);
+          const nicheCompleted = nicheBlocks.filter(([, block]) => block.done).length;
+          const nicheOrderedSteps = nicheBlocks.sort(([a], [b]) => Number(a) - Number(b));
+          const nicheNextStepIndex = nicheOrderedSteps.findIndex(([, block]) => !block.done && !block.blockedReason);
+          return <section key={niche.id} className="niche-board">
+            <div className="niche-board-head">
+              <div><span className="eyebrow">{niche.emoji} {niche.label}</span><h3>{nicheGoal.text}</h3><p>{nicheCompleted} of {nicheOrderedSteps.length} steps complete</p></div>
+              <div className="board-progress" aria-label={`${nicheCompleted} of ${nicheOrderedSteps.length} complete`}><i style={{ width: `${nicheOrderedSteps.length ? nicheCompleted / nicheOrderedSteps.length * 100 : 0}%` }} /></div>
+            </div>
+            <div className="daily-steps">
+              {nicheOrderedSteps.map(([hour, block], index) => <DailyStep
+                key={hour}
+                index={index}
+                block={block}
+                isNext={index === nicheNextStepIndex}
+                onToggle={() => saveBlock(hour, { ...block, done: !block.done, blockedReason: block.done ? block.blockedReason : "" })}
+                onBlock={(blockedReason) => saveBlock(hour, { ...block, blockedReason })}
+                onStart={() => startDailyStep(block)}
+              />)}
+            </div>
+            {!nicheOrderedSteps.length && <p className="board-empty">Goal pinned. Add time blocks below or pin a more detailed goal.</p>}
+          </section>;
+        })}
+      </div>}
 
       <section className="capture-panel">
         <div className="capture-heading"><div><span className="pulse-dot" />LIVE INPUT</div><small>Update this whenever your attention changes.</small></div>
