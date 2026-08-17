@@ -3,6 +3,7 @@ import {
   Activity,
   ArrowRight,
   Bot,
+  Brain,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -28,6 +29,7 @@ import {
 import { hasLiveAgentBridge, requestLiveAssessment } from "./agentClient";
 import { memoryApi } from "./memoryClient";
 import { AgentsView } from "./agentsView";
+import { MemoryView } from "./memoryView";
 
 const AGENT_LANES = ["codex", "hermes", "openclaw"];
 const HOURS = Array.from({ length: 17 }, (_, index) => index + 6);
@@ -540,6 +542,7 @@ export function App() {
       <div className="sidebar-label">YOUR OPERATING SYSTEM</div>
       <button className={`side-nav${view === "command" ? " active" : ""}`} onClick={() => setView("command")}><Gauge size={17} /> Command center</button>
       <button className={`side-nav${view === "agents" ? " active" : ""}`} onClick={() => setView("agents")}><Radio size={17} /> Live agents</button>
+      <button className={`side-nav${view === "memory" ? " active" : ""}`} onClick={() => setView("memory")}><Brain size={17} /> Memory</button>
       <button className={`side-nav${view === "roadmap" ? " active" : ""}`} onClick={() => setView("roadmap")}><Milestone size={17} /> Roadmap</button>
       <button className="side-nav" onClick={() => setView("command")}><ListTodo size={17} /> Daily focus</button>
       <button className="side-nav" onClick={() => setView("command")}><Clock3 size={17} /> Decision history</button>
@@ -562,7 +565,7 @@ export function App() {
     <section className="command-main">
       <div className={`cloud-state ${cloudStatus}`}><i />{cloudStatus === "synced" ? "Cloud synced" : cloudStatus === "syncing" ? "Saving to cloud..." : cloudStatus === "error" ? "Cloud save failed" : "Connecting to cloud..."}</div>
       {loadError && <p role="alert" className="load-error">Could not load your saved data: {loadError}</p>}
-      {view === "agents" ? <AgentsView /> : view === "roadmap" ? <>
+      {view === "agents" ? <AgentsView /> : view === "memory" ? <MemoryView /> : view === "roadmap" ? <>
       <header className="command-header">
         <div><p className="eyebrow">SEQUENCED PLAN</p><h1>Let me figure out what to focus on first.</h1><p className="subhead">Tell me your goal, and I will sequence the work across niches.</p></div>
       </header>
